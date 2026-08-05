@@ -13,7 +13,9 @@ name and current mode (resolution and refresh rate), with:
 
 - **A power button** — disconnects that display; click it again in the "Turned off"
   section to bring it back
-- **Brightness** — slider plus 25 / 50 / 75 / 100% presets
+- **Brightness** — slider plus 25 / 50 / 75 / 100% presets. On monitors that answer
+  DDC this drives the actual backlight; on the rest it dims the image on the GPU and
+  the label reads *Brightness · software*
 - **Warmth** — slider plus 0 / 25 / 50 / 75 / 100% presets
 
 At the bottom, **scenes** set brightness and warmth on every display at once:
@@ -29,10 +31,18 @@ change, which macOS would otherwise wipe.
 
 ## Working on the UI
 
-`./DisplayWave --preview out.png` renders the menu's cards to an image, so layout can
-be checked without opening the menu by hand. Note that AppKit controls are layer-backed:
-they only capture via `CALayer.render(in:)` from inside a running app with a real
-window — `cacheDisplay` alone produces a blank image.
+```bash
+./DisplayWave.app/Contents/MacOS/DisplayWave --preview out.png
+```
+
+Renders the menu's cards to an image so layout can be checked without opening the menu
+by hand. Two things that cost time to discover:
+
+- AppKit controls are layer-backed. They only capture via `CALayer.render(in:)` from
+  inside a running app with a real window; `cacheDisplay` alone produces a blank image.
+- Run the executable **inside the bundle**, not the bare `./DisplayWave` binary. Run
+  bare, it gets a different preferences domain and shows defaults instead of your real
+  settings.
 
 ## Build
 
@@ -65,8 +75,32 @@ fails completely and no software can fix it.
   dims and tints the image before it's sent out. Not true backlight dimming, but it
   works regardless of the monitor.
 
-This app uses the OS-level approach for everything, so it works on monitors with no
-usable DDC at all.
+The app uses DDC for brightness when a monitor supports it, because only that
+genuinely lowers light output, and falls back to gamma otherwise. Power and warmth
+always take the OS-level route, so they work on every monitor.
+
+### Why not always gamma, or always DDC
+
+Gamma dimming darkens the picture but the backlight keeps blazing behind it, so blacks
+stay grey and a dark room still feels lit. DDC lowers the actual backlight — but only
+if the monitor answers, and many don't.
+
+When a monitor does support DDC, the two are never stacked: the backlight does the
+dimming and gamma stays at full brightness, so the picture doesn't end up doubly dark.
+
+### Detecting support safely
+
+A monitor that ignores DDC is not merely slow to answer. `IOAVServiceWriteI2C` can
+block inside the kernel for over a minute on a dead channel, and killing a thread
+partway through a transaction can drop the display off the system entirely until it is
+physically unplugged and replugged. So detection:
+
+- probes each monitor **once**, caches the verdict, and never probes again unasked
+- runs on a detached thread that is **abandoned rather than killed** if it times out
+- never retries a channel that already failed
+
+Use **Re-check Backlight Support** after changing a cable or enabling DDC/CI in a
+monitor's own on-screen menu.
 
 ### Notes
 
