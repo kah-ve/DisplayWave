@@ -12,5 +12,7 @@ tools/enumdisp
 tools/testdisp
 tools/gammatest
 tools/vis
+tools/modetest
+tools/awaketest
 
 .DS_Store

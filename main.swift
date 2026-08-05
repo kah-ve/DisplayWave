@@ -11,6 +11,8 @@ import Foundation
 //            — applied through the GPU's gamma transfer table rather than by asking
 //              the monitor to change its own settings. Also works without DDC, which
 //              matters because most monitors on this desk don't answer DDC at all.
+//   Mode     — resolution and refresh rate, switched the same way System Settings
+//              does it, from dropdowns on each display's card.
 //
 // macOS resets gamma whenever the display configuration changes or the machine wakes,
 // so settings are reapplied from a reconfiguration callback.
@@ -52,6 +54,55 @@ let scenes = [
     Scene(name: "Evening", brightness: 0.70, warmth: 0.40),
     Scene(name: "Night", brightness: 0.40, warmth: 0.80),
 ]
+
+// MARK: - Display modes
+
+/// Every mode the monitor advertises that macOS considers usable for a desktop,
+/// including HiDPI variants of the same point size.
+func displayModes(_ id: CGDirectDisplayID) -> [CGDisplayMode] {
+    let opts = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue!] as CFDictionary
+    let all = CGDisplayCopyAllDisplayModes(id, opts) as? [CGDisplayMode] ?? []
+    return all.filter { $0.isUsableForDesktopGUI() }
+}
+
+/// Distinct point resolutions, largest first.
+func resolutionOptions(_ modes: [CGDisplayMode]) -> [(width: Int, height: Int)] {
+    var seen = Set<Int>()
+    return modes
+        .sorted { $0.width * $0.height > $1.width * $1.height }
+        .compactMap { seen.insert($0.width << 16 | $0.height).inserted ? ($0.width, $0.height) : nil }
+}
+
+/// Refresh rates available at one resolution, fastest first.
+func refreshOptions(_ modes: [CGDisplayMode], width: Int, height: Int) -> [Int] {
+    Set(modes
+        .filter { $0.width == width && $0.height == height && $0.refreshRate > 0 }
+        .map { Int($0.refreshRate.rounded()) })
+        .sorted(by: >)
+}
+
+/// The mode to actually use for a chosen resolution and rate: keep the requested
+/// rate when the resolution offers it, and prefer the HiDPI variant (largest pixel
+/// backing) so text stays sharp.
+func bestMode(_ modes: [CGDisplayMode], width: Int, height: Int, rate: Int?) -> CGDisplayMode? {
+    let candidates = modes.filter { $0.width == width && $0.height == height }
+    let atRate = candidates.filter { Int($0.refreshRate.rounded()) == rate }
+    return (atRate.isEmpty ? candidates : atRate).max {
+        $0.pixelWidth != $1.pixelWidth ? $0.pixelWidth < $1.pixelWidth
+                                       : $0.refreshRate < $1.refreshRate
+    }
+}
+
+// .permanently matches what System Settings does: the chosen mode survives restarts.
+func setMode(_ id: CGDirectDisplayID, _ mode: CGDisplayMode) {
+    var config: CGDisplayConfigRef?
+    guard CGBeginDisplayConfiguration(&config) == .success, let config else { return }
+    guard CGConfigureDisplayWithDisplayMode(config, id, mode, nil) == .success,
+          CGCompleteDisplayConfiguration(config, .permanently) == .success else {
+        CGCancelDisplayConfiguration(config)
+        return
+    }
+}
 
 // MARK: - Display enumeration
 
@@ -156,6 +207,30 @@ func setDisplay(_ id: CGDirectDisplayID, enabled: Bool) -> Bool {
     return true
 }
 
+// MARK: - Keep awake
+
+/// Holds a power-management assertion so the Mac and its displays don't sleep.
+/// Deliberately session-only — it never survives a relaunch, so the machine can't
+/// be left sleepless by a setting someone forgot about.
+final class KeepAwake {
+    static let shared = KeepAwake()
+    private var assertion = IOPMAssertionID(0)
+    private(set) var active = false
+
+    func toggle() {
+        if active {
+            IOPMAssertionRelease(assertion)
+            active = false
+        } else {
+            active = IOPMAssertionCreateWithName(
+                "PreventUserIdleDisplaySleep" as CFString,
+                IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                "DisplayWave — Keep Mac Awake" as CFString,
+                &assertion) == kIOReturnSuccess
+        }
+    }
+}
+
 // MARK: - UI helpers
 
 // Menu content is laid out top-down, which is much easier to reason about flipped.
@@ -180,10 +255,13 @@ func percentString(_ v: Double) -> String { "\(Int((v * 100).rounded()))%" }
 // brightness and warmth, each with a slider and its own preset buttons.
 final class DisplayCard: FlippedView {
     static let width: CGFloat = 320
-    static let height: CGFloat = 186
+    static let height: CGFloat = 190
 
     private let display: Display
+    private let allModes: [CGDisplayMode]
     private weak var hostMenu: NSMenu?
+    private let resolutionPopup = NSPopUpButton()
+    private let refreshPopup = NSPopUpButton()
 
     private let brightnessSlider = NSSlider()
     private let warmthSlider = NSSlider()
@@ -194,6 +272,7 @@ final class DisplayCard: FlippedView {
 
     init(display: Display, menu: NSMenu?, canPowerOff: Bool) {
         self.display = display
+        self.allModes = displayModes(display.id)
         self.hostMenu = menu
         let s = Store.shared[display.name]
         brightnessReadout = label(percentString(s.brightness), size: 11, color: .secondaryLabelColor, align: .right)
@@ -225,10 +304,10 @@ final class DisplayCard: FlippedView {
         addSubview(power)
         y += 18
 
-        let mode = label(display.modeDescription, size: 11, color: .secondaryLabelColor)
-        mode.frame = NSRect(x: pad, y: y, width: contentWidth, height: 14)
-        addSubview(mode)
-        y += 22
+        // Resolution and refresh rate — the same line that used to be read-only,
+        // now directly changeable.
+        setupModePopups(y: y, pad: pad)
+        y += 26
 
         // A monitor that answers DDC dims its own backlight, so it can go genuinely
         // dark; everything else can only darken the image the GPU sends it.
@@ -254,6 +333,38 @@ final class DisplayCard: FlippedView {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    /// Two quiet dropdowns where the mode line used to be: one for resolution, one
+    /// for refresh rate. They read like the old label until clicked.
+    private func setupModePopups(y: CGFloat, pad: CGFloat) {
+        for popup in [resolutionPopup, refreshPopup] {
+            popup.isBordered = false
+            popup.font = .systemFont(ofSize: 11)
+            popup.target = self
+        }
+
+        for (w, h) in resolutionOptions(allModes) {
+            resolutionPopup.addItem(withTitle: "\(w) × \(h)")
+            resolutionPopup.lastItem?.representedObject = [w, h]
+        }
+        resolutionPopup.selectItem(withTitle: "\(display.width) × \(display.height)")
+        resolutionPopup.action = #selector(resolutionPicked)
+        resolutionPopup.toolTip = "Change this display's resolution"
+        resolutionPopup.frame = NSRect(x: pad - 8, y: y - 3, width: 112, height: 20)
+        addSubview(resolutionPopup)
+
+        let rates = refreshOptions(allModes, width: display.width, height: display.height)
+        for r in rates {
+            refreshPopup.addItem(withTitle: "\(r) Hz")
+            refreshPopup.lastItem?.representedObject = r
+        }
+        refreshPopup.selectItem(withTitle: "\(Int(display.refresh.rounded())) Hz")
+        refreshPopup.action = #selector(refreshRatePicked)
+        refreshPopup.toolTip = "Change this display's refresh rate"
+        refreshPopup.frame = NSRect(x: pad + 116, y: y - 3, width: 68, height: 20)
+        refreshPopup.isHidden = rates.isEmpty
+        addSubview(refreshPopup)
+    }
 
     /// Lays out a labelled control: caption row with the current value, the slider
     /// beneath it, and the preset buttons under that.
@@ -354,6 +465,24 @@ final class DisplayCard: FlippedView {
         warmthSlider.doubleValue = v
         warmthReadout.stringValue = percentString(v)
         commit(s)
+    }
+
+    @objc private func resolutionPicked() {
+        guard let dims = resolutionPopup.selectedItem?.representedObject as? [Int],
+              dims.count == 2,
+              let mode = bestMode(allModes, width: dims[0], height: dims[1],
+                                  rate: display.refresh > 0 ? Int(display.refresh.rounded()) : nil)
+        else { return }
+        hostMenu?.cancelTracking()
+        setMode(display.id, mode)
+    }
+
+    @objc private func refreshRatePicked() {
+        guard let rate = refreshPopup.selectedItem?.representedObject as? Int,
+              let mode = bestMode(allModes, width: display.width, height: display.height, rate: rate)
+        else { return }
+        hostMenu?.cancelTracking()
+        setMode(display.id, mode)
     }
 
     @objc private func togglePower() {
@@ -489,6 +618,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(.separator())
         }
 
+        let awake = NSMenuItem(title: "Keep Mac Awake", action: #selector(toggleKeepAwake), keyEquivalent: "")
+        awake.target = self
+        awake.state = KeepAwake.shared.active ? .on : .off
+        awake.image = NSImage(systemSymbolName: KeepAwake.shared.active ? "cup.and.saucer.fill" : "cup.and.saucer",
+                              accessibilityDescription: nil)
+        awake.toolTip = "Stops the Mac and its displays from sleeping until this is turned off or DisplayWave quits"
+        menu.addItem(awake)
+        menu.addItem(.separator())
+
         let recheck = NSMenuItem(title: "Re-check Backlight Support", action: #selector(recheckHardware), keyEquivalent: "")
         recheck.target = self
         recheck.toolTip = "Run after changing a cable or turning on DDC/CI in a monitor's own menu"
@@ -525,6 +663,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Store.shared.reset()
         CGDisplayRestoreColorSyncSettings()
         applyAll()
+    }
+
+    @objc private func toggleKeepAwake() {
+        KeepAwake.shared.toggle()
     }
 
     @objc private func recheckHardware() {
