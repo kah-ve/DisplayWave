@@ -3,6 +3,7 @@
 
 #include <CoreGraphics/CoreGraphics.h>
 #include <IOKit/IOKitLib.h>
+#include <IOKit/pwr_mgt/IOPMLib.h>
 
 extern CFDictionaryRef CoreDisplay_DisplayCreateInfoDictionary(CGDirectDisplayID display);
 

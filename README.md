@@ -9,8 +9,12 @@ monitors, and the feature that works everywhere is paywalled in BetterDisplay Pr
 ## What it does
 
 Click the moon icon in the menu bar. Every connected display gets a card showing its
-name and current mode (resolution and refresh rate), with:
+name, with:
 
+- **Resolution and refresh rate dropdowns** — the mode line under the display's name
+  is directly changeable. Resolution picks keep the current refresh rate when the new
+  resolution offers it, and prefer the HiDPI variant so text stays sharp. Changes are
+  applied the same way System Settings does, so they survive restarts.
 - **A power button** — disconnects that display; click it again in the "Turned off"
   section to bring it back
 - **Brightness** — slider plus 25 / 50 / 75 / 100% presets. On monitors that answer
@@ -26,8 +30,17 @@ At the bottom, **scenes** set brightness and warmth on every display at once:
 | Evening | 70% | 40% |
 | Night | 40% | 80% |
 
+**Keep Mac Awake** holds a power-management assertion so the Mac and its displays
+don't sleep — the same trick as `caffeinate`. It is deliberately session-only: it
+never survives a relaunch, so the machine can't be left sleepless by a forgotten
+setting.
+
 Settings are saved per monitor and reapplied automatically after sleep or a display
 change, which macOS would otherwise wipe.
+
+There is no "detect displays" button on purpose: the menu re-enumerates displays
+every time it opens, and a reconfiguration callback catches plugging and unplugging,
+so the list is always current.
 
 ## Working on the UI
 
