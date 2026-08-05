@@ -8,14 +8,31 @@ monitors, and the feature that works everywhere is paywalled in BetterDisplay Pr
 
 ## What it does
 
-Click the sun icon in the menu bar. Every connected display gets:
+Click the moon icon in the menu bar. Every connected display gets a card showing its
+name and current mode (resolution and refresh rate), with:
 
-- **A name row** — click to disconnect/reconnect that display (its power toggle)
-- **A brightness slider**
-- **A warmth slider**
+- **A power button** — disconnects that display; click it again in the "Turned off"
+  section to bring it back
+- **Brightness** — slider plus 25 / 50 / 75 / 100% presets
+- **Warmth** — slider plus 0 / 25 / 50 / 75 / 100% presets
+
+At the bottom, **scenes** set brightness and warmth on every display at once:
+
+| Scene | Brightness | Warmth |
+|---|---|---|
+| Day | 100% | 0% |
+| Evening | 70% | 40% |
+| Night | 40% | 80% |
 
 Settings are saved per monitor and reapplied automatically after sleep or a display
 change, which macOS would otherwise wipe.
+
+## Working on the UI
+
+`./DisplayWave --preview out.png` renders the menu's cards to an image, so layout can
+be checked without opening the menu by hand. Note that AppKit controls are layer-backed:
+they only capture via `CALayer.render(in:)` from inside a running app with a real
+window — `cacheDisplay` alone produces a blank image.
 
 ## Build
 
