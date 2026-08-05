@@ -1,0 +1,37 @@
+#!/bin/bash
+# Builds DisplayWave.app. Run ./build.sh, then open DisplayWave.app.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+APP="DisplayWave.app"
+
+swiftc -O -import-objc-header bridge.h main.swift -o DisplayWave \
+    -framework AppKit -framework CoreGraphics -framework CoreDisplay
+
+mkdir -p "$APP/Contents/MacOS"
+cp DisplayWave "$APP/Contents/MacOS/"
+
+cat > "$APP/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>DisplayWave</string>
+	<key>CFBundleIdentifier</key>
+	<string>local.wave.displaywave</string>
+	<key>CFBundleName</key>
+	<string>DisplayWave</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+</dict>
+</plist>
+PLIST
+
+echo "Built $APP — run: open $APP"
