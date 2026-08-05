@@ -113,19 +113,31 @@ final class Store {
 // Brightness scales the whole output; warmth pulls down green and blue so what's
 // left skews red. The brightness floor keeps a screen from going fully black, which
 // would leave no way to see the menu that brings it back.
-func applyGamma(_ id: CGDirectDisplayID, _ s: Settings) {
-    let b = Float(max(0.15, min(1.0, s.brightness)))
-    let w = Float(max(0.0, min(1.0, s.warmth)))
+func applyGamma(_ id: CGDirectDisplayID, brightness: Double, warmth: Double) {
+    let b = Float(max(0.15, min(1.0, brightness)))
+    let w = Float(max(0.0, min(1.0, warmth)))
     CGSetDisplayTransferByFormula(id,
                                   0, b, 1.0,
                                   0, b * (1.0 - 0.18 * w), 1.0,
                                   0, b * (1.0 - 0.45 * w), 1.0)
 }
 
-func applyAll() {
-    for d in onlineDisplays() where d.active {
-        applyGamma(d.id, Store.shared[d.name])
+/// Applies a display's settings using whichever brightness mechanism it supports.
+/// On a monitor that answers DDC the backlight does the dimming and gamma is left at
+/// full brightness, so the two never stack into a doubly-dark picture.
+func apply(_ display: Display) {
+    let s = Store.shared[display.name]
+    if Capabilities.shared.mode(for: display.name) == .hardware,
+       let service = Capabilities.shared.service(for: display.name) {
+        Backlight.shared.set(percent: s.brightness, id: display.id, service: service)
+        applyGamma(display.id, brightness: 1.0, warmth: s.warmth)
+    } else {
+        applyGamma(display.id, brightness: s.brightness, warmth: s.warmth)
     }
+}
+
+func applyAll() {
+    for d in onlineDisplays() where d.active { apply(d) }
 }
 
 // kCGConfigureForSession keeps this out of the permanent display configuration, so a
@@ -218,14 +230,22 @@ final class DisplayCard: FlippedView {
         addSubview(mode)
         y += 22
 
-        y = addControlGroup(title: "Brightness", icon: "sun.max",
-                            slider: brightnessSlider, minValue: 0.15, value: s.brightness,
+        // A monitor that answers DDC dims its own backlight, so it can go genuinely
+        // dark; everything else can only darken the image the GPU sends it.
+        let hardware = Capabilities.shared.mode(for: display.name) == .hardware
+        y = addControlGroup(title: hardware ? "Brightness" : "Brightness · software",
+                            icon: hardware ? "sun.max.fill" : "sun.max",
+                            tooltip: hardware
+                                ? "Adjusts this monitor's backlight"
+                                : "This monitor doesn't answer DDC, so the image is dimmed on the GPU instead of lowering the backlight",
+                            slider: brightnessSlider, minValue: hardware ? 0.05 : 0.15, value: s.brightness,
                             readout: brightnessReadout, action: #selector(brightnessChanged),
                             presets: brightnessPresetControl, presetAction: #selector(brightnessPresetPicked),
                             presetValues: brightnessPresets, current: s.brightness,
                             y: y, pad: pad, contentWidth: contentWidth)
         y += 10
         _ = addControlGroup(title: "Warmth", icon: "moon.fill",
+                            tooltip: "Shifts the picture warmer by reducing blue on the GPU",
                             slider: warmthSlider, minValue: 0.0, value: s.warmth,
                             readout: warmthReadout, action: #selector(warmthChanged),
                             presets: warmthPresetControl, presetAction: #selector(warmthPresetPicked),
@@ -237,7 +257,7 @@ final class DisplayCard: FlippedView {
 
     /// Lays out a labelled control: caption row with the current value, the slider
     /// beneath it, and the preset buttons under that.
-    private func addControlGroup(title: String, icon: String, slider: NSSlider,
+    private func addControlGroup(title: String, icon: String, tooltip: String, slider: NSSlider,
                                  minValue: Double, value: Double, readout: NSTextField,
                                  action: Selector, presets: NSSegmentedControl,
                                  presetAction: Selector, presetValues: [Double], current: Double,
@@ -250,6 +270,8 @@ final class DisplayCard: FlippedView {
 
         let caption = label(title, size: 11, weight: .medium, color: .secondaryLabelColor)
         caption.frame = NSRect(x: pad + 18, y: y, width: contentWidth - 60, height: 14)
+        caption.toolTip = tooltip
+        iconView.toolTip = tooltip
         addSubview(caption)
 
         readout.frame = NSRect(x: pad + contentWidth - 42, y: y, width: 42, height: 14)
@@ -293,7 +315,7 @@ final class DisplayCard: FlippedView {
 
     private func commit(_ s: Settings) {
         Store.shared[display.name] = s
-        applyGamma(display.id, s)
+        apply(display)
     }
 
     private func syncPresets(_ control: NSSegmentedControl, values: [Double], to value: Double) {
@@ -373,7 +395,7 @@ final class SceneRow: FlippedView {
             s.brightness = scene.brightness
             s.warmth = scene.warmth
             Store.shared[d.name] = s
-            applyGamma(d.id, s)
+            apply(d)
         }
         AppDelegate.shared?.refreshVisibleCards()
     }
@@ -408,6 +430,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
 
         applyAll()
+        // Work out which monitors can dim their own backlight. This touches the DDC
+        // channel, so it happens off the main thread and only for monitors we haven't
+        // already classified.
+        Capabilities.shared.probeUnknown(displays: onlineDisplays().filter(\.active)) {
+            applyAll()
+        }
         // macOS wipes gamma on display changes and on wake, so reapply afterwards.
         CGDisplayRegisterReconfigurationCallback({ _, flags, _ in
             // beginConfigurationFlag fires before the change lands; reapplying then
@@ -461,6 +489,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(.separator())
         }
 
+        let recheck = NSMenuItem(title: "Re-check Backlight Support", action: #selector(recheckHardware), keyEquivalent: "")
+        recheck.target = self
+        recheck.toolTip = "Run after changing a cable or turning on DDC/CI in a monitor's own menu"
+        menu.addItem(recheck)
+
         let reset = NSMenuItem(title: "Reset All to Default", action: #selector(resetAll), keyEquivalent: "")
         reset.target = self
         menu.addItem(reset)
@@ -491,6 +524,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func resetAll() {
         Store.shared.reset()
         CGDisplayRestoreColorSyncSettings()
+        applyAll()
+    }
+
+    @objc private func recheckHardware() {
+        Capabilities.shared.forget()
+        Capabilities.shared.probeUnknown(displays: onlineDisplays().filter(\.active)) {
+            applyAll()
+        }
     }
 }
 
