@@ -35,11 +35,10 @@ or they don't handle it all in one app. DisplayWave is free and open source. Enj
   unplugging, or display changes — which macOS would otherwise wipe.
 - No dock icon, no background services, no accounts, no payments. One menu.
 
-## Alternatives, honestly
+## Alternatives
 
-These are all good tools — DisplayWave exists because none of them covered this
-exact combination: power + brightness + warmth, per monitor, working even on
-DDC-less monitors, minimal, and free.
+DisplayWave exists because none of these covered the same combination: power +
+brightness + warmth, per monitor, working even on DDC-less monitors, minimal, free.
 
 | App | What it's great at | Where DisplayWave differs |
 |---|---|---|
@@ -51,9 +50,9 @@ DDC-less monitors, minimal, and free.
 | Amphetamine / `caffeinate` | Keep-awake with schedules and triggers | DisplayWave has one keep-awake toggle, sitting next to the monitor controls where you already are. |
 
 If you want keyboard-key brightness on DDC monitors, use MonitorControl. If you
-want virtual displays or EDID surgery, buy BetterDisplay — it's excellent. If you
-want a small free menu that turns monitors off, dims and warms them regardless of
-DDC support, and stays out of the way: that's this.
+want virtual displays or EDID overrides, buy BetterDisplay. If you want a small
+free menu that turns monitors off and dims and warms them regardless of DDC
+support, use this.
 
 ## Install
 
