@@ -35,6 +35,26 @@ or they don't handle it all in one app. DisplayWave is free and open source. Enj
   unplugging, or display changes — which macOS would otherwise wipe.
 - No dock icon, no background services, no accounts, no payments. One menu.
 
+## Alternatives, honestly
+
+These are all good tools — DisplayWave exists because none of them covered this
+exact combination: power + brightness + warmth, per monitor, working even on
+DDC-less monitors, minimal, and free.
+
+| App | What it's great at | Where DisplayWave differs |
+|---|---|---|
+| [MonitorControl](https://github.com/MonitorControl/MonitorControl) | Free, open source, DDC brightness/volume from your keyboard keys | DDC-only — on a monitor that doesn't answer DDC it can do nothing. No power off/on, no warmth. |
+| [BetterDisplay](https://github.com/waydabber/BetterDisplay) | The power tool: virtual displays, EDID overrides, PIP, everything | Monitor disconnect — the feature this app was born for — sits in the paid Pro tier, inside a very large feature surface. |
+| [Lunar](https://lunar.fyi) | Adaptive brightness synced to ambient light or the built-in display | The adaptive features are paid, and hardware control is DDC-centric. |
+| f.lux / Night Shift | Automatic time-of-day color temperature | Applies to all displays equally; no per-monitor warmth, no brightness or power. |
+| [DisplayBuddy](https://displaybuddy.app) | Polished presets across many monitors | Paid, and hardware control is DDC-centric with the same gamma fallback this app uses — just not free. |
+| Amphetamine / `caffeinate` | Keep-awake with schedules and triggers | DisplayWave has one keep-awake toggle, sitting next to the monitor controls where you already are. |
+
+If you want keyboard-key brightness on DDC monitors, use MonitorControl. If you
+want virtual displays or EDID surgery, buy BetterDisplay — it's excellent. If you
+want a small free menu that turns monitors off, dims and warms them regardless of
+DDC support, and stays out of the way: that's this.
+
 ## Install
 
 Requires macOS 13+ and the Xcode command line tools (`xcode-select --install`).
