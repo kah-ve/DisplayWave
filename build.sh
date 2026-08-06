@@ -9,8 +9,9 @@ swiftc -O -import-objc-header bridge.h DDC.swift main.swift -o DisplayWave \
     -framework AppKit -framework CoreGraphics -framework CoreDisplay -framework IOKit \
     -framework ServiceManagement
 
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp DisplayWave "$APP/Contents/MacOS/"
+cp assets/AppIcon.icns assets/MenuIcon.png "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -23,6 +24,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 	<string>local.wave.displaywave</string>
 	<key>CFBundleName</key>
 	<string>DisplayWave</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

@@ -719,7 +719,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "moon.stars", accessibilityDescription: "DisplayWave")
+        // The wave-W mark; the moon symbol is the fallback if the resource is missing
+        // (e.g. running the bare binary outside the bundle).
+        if let path = Bundle.main.path(forResource: "MenuIcon", ofType: "png"),
+           let icon = NSImage(contentsOfFile: path) {
+            icon.size = NSSize(width: 18, height: 18)
+            statusItem.button?.image = icon
+        } else {
+            statusItem.button?.image = NSImage(systemSymbolName: "moon.stars", accessibilityDescription: "DisplayWave")
+        }
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
