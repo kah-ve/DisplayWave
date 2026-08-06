@@ -39,7 +39,7 @@ struct Display {
     }
 }
 
-let brightnessPresets: [Double] = [0.25, 0.50, 0.75, 1.0]
+let brightnessPresets: [Double] = [0.35, 0.50, 0.75, 1.0]
 let warmthPresets: [Double] = [0.0, 0.25, 0.50, 0.75, 1.0]
 
 // One-click combinations applied to every display at once.
@@ -332,6 +332,7 @@ final class DisplayCard: FlippedView {
                                 : "This monitor doesn't answer DDC, so the image is dimmed on the GPU instead of lowering the backlight",
                             slider: brightnessSlider, minValue: hardware ? 0.05 : 0.15, value: s.brightness,
                             readout: brightnessReadout, action: #selector(brightnessChanged),
+                            stepAction: #selector(brightnessStepped(_:)),
                             presets: brightnessPresetControl, presetAction: #selector(brightnessPresetPicked),
                             presetValues: brightnessPresets, current: s.brightness,
                             y: y, pad: pad, contentWidth: contentWidth)
@@ -340,6 +341,7 @@ final class DisplayCard: FlippedView {
                             tooltip: "Shifts the picture warmer by reducing blue on the GPU",
                             slider: warmthSlider, minValue: 0.0, value: s.warmth,
                             readout: warmthReadout, action: #selector(warmthChanged),
+                            stepAction: #selector(warmthStepped(_:)),
                             presets: warmthPresetControl, presetAction: #selector(warmthPresetPicked),
                             presetValues: warmthPresets, current: s.warmth,
                             y: y, pad: pad, contentWidth: contentWidth)
@@ -392,7 +394,7 @@ final class DisplayCard: FlippedView {
     private func addControlGroup(title: String, icon: String, tint: NSColor, tooltip: String,
                                  slider: NSSlider,
                                  minValue: Double, value: Double, readout: NSTextField,
-                                 action: Selector, presets: NSSegmentedControl,
+                                 action: Selector, stepAction: Selector, presets: NSSegmentedControl,
                                  presetAction: Selector, presetValues: [Double], current: Double,
                                  y: CGFloat, pad: CGFloat, contentWidth: CGFloat) -> CGFloat {
         var y = y
@@ -417,8 +419,20 @@ final class DisplayCard: FlippedView {
         slider.isContinuous = true
         slider.target = self
         slider.action = action
-        slider.frame = NSRect(x: pad, y: y, width: contentWidth, height: 19)
+        slider.frame = NSRect(x: pad, y: y, width: contentWidth - 62, height: 19)
         addSubview(slider)
+
+        // Tiny nudge buttons for fine adjustment without aiming at the slider.
+        for (i, (tag, title)) in [(-1, "−5"), (1, "+5")].enumerated() {
+            let button = NSButton(title: title, target: self, action: stepAction)
+            button.tag = tag
+            button.bezelStyle = .rounded
+            button.controlSize = .mini
+            button.font = .systemFont(ofSize: 10)
+            button.frame = NSRect(x: pad + contentWidth - 56 + CGFloat(i) * 29, y: y - 1,
+                                  width: 27, height: 18)
+            addSubview(button)
+        }
         y += 21
 
         presets.segmentDistribution = .fillEqually
@@ -470,6 +484,17 @@ final class DisplayCard: FlippedView {
         warmthReadout.stringValue = percentString(s.warmth)
         syncPresets(warmthPresetControl, values: warmthPresets, to: s.warmth)
         commit(s)
+    }
+
+    @objc private func brightnessStepped(_ sender: NSButton) {
+        brightnessSlider.doubleValue = min(1, max(brightnessSlider.minValue,
+                                                  brightnessSlider.doubleValue + 0.05 * Double(sender.tag)))
+        brightnessChanged()
+    }
+
+    @objc private func warmthStepped(_ sender: NSButton) {
+        warmthSlider.doubleValue = min(1, max(0, warmthSlider.doubleValue + 0.05 * Double(sender.tag)))
+        warmthChanged()
     }
 
     @objc private func brightnessPresetPicked() {
