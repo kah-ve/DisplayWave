@@ -719,15 +719,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        // The wave-W mark; the moon symbol is the fallback if the resource is missing
-        // (e.g. running the bare binary outside the bundle).
-        if let path = Bundle.main.path(forResource: "MenuIcon", ofType: "png"),
-           let icon = NSImage(contentsOfFile: path) {
-            icon.size = NSSize(width: 18, height: 18)
-            statusItem.button?.image = icon
-        } else {
-            statusItem.button?.image = NSImage(systemSymbolName: "moon.stars", accessibilityDescription: "DisplayWave")
-        }
+        statusItem.button?.image = Self.menuBarIcon()
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -752,6 +744,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ) { _ in
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { resyncAndApply() }
         }
+    }
+
+    /// The wave-W from the logo, drawn as a template image: crisp at any backing
+    /// scale, white in a dark menu bar and black in a light one.
+    private static func menuBarIcon() -> NSImage {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: true) { _ in
+            let p = NSBezierPath()
+            p.lineWidth = 1.7
+            p.lineCapStyle = .round
+            p.lineJoinStyle = .round
+            p.move(to: NSPoint(x: 2.6, y: 4.6))
+            p.curve(to: NSPoint(x: 5.6, y: 13.4),
+                    controlPoint1: NSPoint(x: 3.6, y: 7.8), controlPoint2: NSPoint(x: 4.3, y: 11.4))
+            p.curve(to: NSPoint(x: 9.0, y: 6.0),
+                    controlPoint1: NSPoint(x: 6.9, y: 10.8), controlPoint2: NSPoint(x: 8.0, y: 8.4))
+            p.curve(to: NSPoint(x: 12.4, y: 13.4),
+                    controlPoint1: NSPoint(x: 10.0, y: 8.4), controlPoint2: NSPoint(x: 11.1, y: 10.8))
+            p.curve(to: NSPoint(x: 15.4, y: 4.6),
+                    controlPoint1: NSPoint(x: 13.7, y: 11.4), controlPoint2: NSPoint(x: 14.4, y: 7.8))
+            NSColor.black.setStroke()
+            p.stroke()
+            return true
+        }
+        image.isTemplate = true
+        return image
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
