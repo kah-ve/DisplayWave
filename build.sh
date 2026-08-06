@@ -6,7 +6,8 @@ cd "$(dirname "$0")"
 APP="DisplayWave.app"
 
 swiftc -O -import-objc-header bridge.h DDC.swift main.swift -o DisplayWave \
-    -framework AppKit -framework CoreGraphics -framework CoreDisplay -framework IOKit
+    -framework AppKit -framework CoreGraphics -framework CoreDisplay -framework IOKit \
+    -framework ServiceManagement
 
 mkdir -p "$APP/Contents/MacOS"
 cp DisplayWave "$APP/Contents/MacOS/"

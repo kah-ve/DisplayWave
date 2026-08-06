@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import ServiceManagement
 
 // DisplayWave — menu bar control for external monitors.
 //
@@ -794,6 +795,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                               accessibilityDescription: nil)
         awake.toolTip = "Stops the Mac and its displays from sleeping until this is turned off or DisplayWave quits"
         menu.addItem(awake)
+
+        let login = NSMenuItem(title: "Start at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
+        login.target = self
+        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        login.toolTip = "Launches DisplayWave automatically when you log in"
+        menu.addItem(login)
         menu.addItem(.separator())
 
         let arrange = NSMenuItem(title: "Arrange Displays…", action: #selector(arrangeDisplays), keyEquivalent: "")
@@ -847,6 +854,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggleKeepAwake() {
         KeepAwake.shared.toggle()
+    }
+
+    @objc private func toggleLoginItem() {
+        do {
+            if SMAppService.mainApp.status == .enabled {
+                try SMAppService.mainApp.unregister()
+            } else {
+                try SMAppService.mainApp.register()
+            }
+        } catch {
+            NSSound.beep()
+        }
     }
 
     @objc private func arrangeDisplays() {
