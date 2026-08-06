@@ -60,7 +60,27 @@ Requires macOS 13+ and the Xcode command line tools (`xcode-select --install`).
 Hardware backlight control uses the Apple Silicon display driver; everything else
 also works on Intel, where brightness falls back to GPU dimming.
 
-**Option 1 — build from source** (recommended)
+**Option 1 — download the release**
+
+1. Download the zip from [Releases](https://github.com/kah-ve/DisplayWave/releases)
+   and unzip it.
+2. Move `DisplayWave.app` to Applications.
+3. **Clear the quarantine flag** — this step is required. macOS marks every
+   downloaded app as quarantined, and because this app isn't notarized with Apple,
+   it will refuse to open ("unidentified developer" / "damaged") until the flag is
+   removed. Run this in Terminal:
+
+   ```bash
+   xattr -cr /Applications/DisplayWave.app
+   ```
+
+4. Open the app. It appears as a wave icon in the menu bar, not in the Dock.
+
+You don't need to try opening it first — run the command right after moving the
+app. And if you already double-clicked and got the warning, the same command fixes
+it. (Right-click → Open → Open also works, without the terminal.)
+
+**Option 2 — build from source**
 
 ```bash
 git clone https://github.com/kah-ve/DisplayWave.git
@@ -69,21 +89,8 @@ cd DisplayWave
 open DisplayWave.app
 ```
 
-Because you build it on your own machine, there is no Gatekeeper warning to fight —
-quarantine only applies to downloaded binaries.
-
-**Option 2 — download a release**
-
-Grab the zip from [Releases](https://github.com/kah-ve/DisplayWave/releases), unzip
-it, and move `DisplayWave.app` to Applications. macOS will refuse to open it
-("unidentified developer") because the app isn't notarized with Apple — clear the
-quarantine flag and it opens normally:
-
-```bash
-xattr -cr /Applications/DisplayWave.app
-```
-
-(Right-click → Open → Open works too, without the terminal.)
+Because you build it on your own machine there is no quarantine flag at all, so no
+`xattr` step — macOS only quarantines downloaded binaries.
 
 Either way, to have it start automatically: open the menu and click **Start at
 Login**.
