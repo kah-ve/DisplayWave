@@ -180,7 +180,7 @@ func apply(_ display: Display) {
     let s = Store.shared[display.name]
     if Capabilities.shared.mode(for: display.name) == .hardware,
        let service = Capabilities.shared.service(for: display.name) {
-        Backlight.shared.set(percent: s.brightness, id: display.id, service: service)
+        Backlight.shared.set(percent: s.brightness, id: display.id, name: display.name, service: service)
         applyGamma(display.id, brightness: 1.0, warmth: s.warmth)
     } else {
         applyGamma(display.id, brightness: s.brightness, warmth: s.warmth)
@@ -189,6 +189,14 @@ func apply(_ display: Display) {
 
 func applyAll() {
     for d in onlineDisplays() where d.active { apply(d) }
+}
+
+/// Refreshes the DDC service handles first, then reapplies — for after any display
+/// reconfiguration, which invalidates the old handles.
+func resyncAndApply() {
+    Capabilities.shared.reattachServices(displays: onlineDisplays().filter(\.active)) {
+        applyAll()
+    }
 }
 
 // kCGConfigureForSession keeps this out of the permanent display configuration, so a
@@ -287,8 +295,13 @@ final class DisplayCard: FlippedView {
         let contentWidth = Self.width - pad * 2
         var y: CGFloat = 12
 
+        let glyph = NSImageView(frame: NSRect(x: pad, y: y + 1, width: 16, height: 14))
+        glyph.image = NSImage(systemSymbolName: "display", accessibilityDescription: nil)
+        glyph.contentTintColor = .labelColor
+        addSubview(glyph)
+
         let name = label(display.name, size: 13, weight: .semibold)
-        name.frame = NSRect(x: pad, y: y, width: contentWidth - 28, height: 17)
+        name.frame = NSRect(x: pad + 22, y: y, width: contentWidth - 50, height: 17)
         addSubview(name)
 
         let power = NSButton()
@@ -313,7 +326,7 @@ final class DisplayCard: FlippedView {
         // dark; everything else can only darken the image the GPU sends it.
         let hardware = Capabilities.shared.mode(for: display.name) == .hardware
         y = addControlGroup(title: hardware ? "Brightness" : "Brightness · software",
-                            icon: hardware ? "sun.max.fill" : "sun.max",
+                            icon: hardware ? "sun.max.fill" : "sun.max", tint: .systemYellow,
                             tooltip: hardware
                                 ? "Adjusts this monitor's backlight"
                                 : "This monitor doesn't answer DDC, so the image is dimmed on the GPU instead of lowering the backlight",
@@ -323,7 +336,7 @@ final class DisplayCard: FlippedView {
                             presetValues: brightnessPresets, current: s.brightness,
                             y: y, pad: pad, contentWidth: contentWidth)
         y += 10
-        _ = addControlGroup(title: "Warmth", icon: "moon.fill",
+        _ = addControlGroup(title: "Warmth", icon: "sunset.fill", tint: .systemOrange,
                             tooltip: "Shifts the picture warmer by reducing blue on the GPU",
                             slider: warmthSlider, minValue: 0.0, value: s.warmth,
                             readout: warmthReadout, action: #selector(warmthChanged),
@@ -333,6 +346,14 @@ final class DisplayCard: FlippedView {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    // A subtle rounded panel behind each monitor's controls, so the cards read as
+    // separate cards instead of one run-on column. labelColor adapts to the menu's
+    // light or dark appearance.
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.labelColor.withAlphaComponent(0.055).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 4), xRadius: 8, yRadius: 8).fill()
+    }
 
     /// Two quiet dropdowns where the mode line used to be: one for resolution, one
     /// for refresh rate. They read like the old label until clicked.
@@ -368,7 +389,8 @@ final class DisplayCard: FlippedView {
 
     /// Lays out a labelled control: caption row with the current value, the slider
     /// beneath it, and the preset buttons under that.
-    private func addControlGroup(title: String, icon: String, tooltip: String, slider: NSSlider,
+    private func addControlGroup(title: String, icon: String, tint: NSColor, tooltip: String,
+                                 slider: NSSlider,
                                  minValue: Double, value: Double, readout: NSTextField,
                                  action: Selector, presets: NSSegmentedControl,
                                  presetAction: Selector, presetValues: [Double], current: Double,
@@ -376,7 +398,7 @@ final class DisplayCard: FlippedView {
         var y = y
         let iconView = NSImageView(frame: NSRect(x: pad, y: y + 1, width: 13, height: 13))
         iconView.image = NSImage(systemSymbolName: icon, accessibilityDescription: title)
-        iconView.contentTintColor = .secondaryLabelColor
+        iconView.contentTintColor = tint
         addSubview(iconView)
 
         let caption = label(title, size: 11, weight: .medium, color: .secondaryLabelColor)
@@ -402,6 +424,7 @@ final class DisplayCard: FlippedView {
         presets.segmentDistribution = .fillEqually
         presets.controlSize = .small
         presets.font = .systemFont(ofSize: 10)
+        presets.selectedSegmentBezelColor = tint.withAlphaComponent(0.55)
         presets.target = self
         presets.action = presetAction
         presets.selectedSegment = presetValues.firstIndex { abs($0 - current) < 0.005 } ?? -1
@@ -565,17 +588,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Capabilities.shared.probeUnknown(displays: onlineDisplays().filter(\.active)) {
             applyAll()
         }
-        // macOS wipes gamma on display changes and on wake, so reapply afterwards.
+        // macOS wipes gamma on display changes and on wake, and reconfigurations also
+        // invalidate the cached DDC service handles — so re-attach those, then reapply.
         CGDisplayRegisterReconfigurationCallback({ _, flags, _ in
             // beginConfigurationFlag fires before the change lands; reapplying then
             // would just be overwritten by the change itself.
             if flags.contains(.beginConfigurationFlag) { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { applyAll() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { resyncAndApply() }
         }, nil)
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { _ in
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { applyAll() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { resyncAndApply() }
         }
     }
 
@@ -591,8 +615,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let item = NSMenuItem()
             item.view = card
             menu.addItem(item)
-            menu.addItem(.separator())
         }
+        // The card backgrounds separate the displays visually; one separator closes
+        // the section.
+        if activeCount > 0 { menu.addItem(.separator()) }
 
         // Displays we turned off no longer enumerate, so list them from what we saved.
         let stillOff = offDisplays.filter { entry in !online.contains { $0.id == entry.value } }
@@ -629,7 +655,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let recheck = NSMenuItem(title: "Re-check Backlight Support", action: #selector(recheckHardware), keyEquivalent: "")
         recheck.target = self
-        recheck.toolTip = "Run after changing a cable or turning on DDC/CI in a monitor's own menu"
+        recheck.toolTip = "Probes monitors again — use after changing a cable, enabling DDC/CI in a monitor's menu, or if brightness stops responding"
         menu.addItem(recheck)
 
         let reset = NSMenuItem(title: "Reset All to Default", action: #selector(resetAll), keyEquivalent: "")
@@ -650,7 +676,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         offDisplays = off
         if on {
             // The display needs a moment to come back before gamma will stick.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { applyAll() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { resyncAndApply() }
         }
     }
 

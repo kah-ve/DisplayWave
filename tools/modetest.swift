@@ -27,7 +27,18 @@ CGGetOnlineDisplayList(16, &ids, &count)
 let online = Array(ids.prefix(Int(count)))
 
 let args = CommandLine.arguments
-if args.count >= 5, args[1] == "set" {
+if args.count >= 5, args[1] == "hold" {
+    let id = CGDirectDisplayID(UInt32(args[2])!)
+    let w = Int(args[3])!, h = Int(args[4])!
+    let hz = args.count > 5 ? Double(args[5])! : 0
+    let target = modes(id).filter { $0.width == w && $0.height == h }
+        .filter { hz == 0 || abs($0.refreshRate - hz) < 1 }
+        .max { $0.pixelWidth < $1.pixelWidth }
+    guard let target else { fatalError("no such mode") }
+    print(set(id, target) ? "set OK" : "set FAILED")
+    let now = CGDisplayCopyDisplayMode(id)!
+    print("final mode: \(now.width)x\(now.height)@\(Int(now.refreshRate))")
+} else if args.count >= 5, args[1] == "set" {
     let id = CGDirectDisplayID(UInt32(args[2])!)
     let w = Int(args[3])!, h = Int(args[4])!
     let hz = args.count > 5 ? Double(args[5])! : 0
