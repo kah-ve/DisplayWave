@@ -33,6 +33,7 @@ entirely free.
   per control, per monitor.
 - **Keep Mac Awake** — a caffeinate toggle. Deliberately session-only, so a
   forgotten toggle can't outlive the app.
+- **Start at Login** — one click in the menu, no digging through System Settings.
 - Settings are remembered per monitor and reapplied automatically after sleep,
   unplugging, or display changes — which macOS would otherwise wipe.
 - No dock icon, no background services, no accounts, no payments. One menu.
@@ -68,8 +69,8 @@ xattr -cr /Applications/DisplayWave.app
 
 (Right-click → Open → Open works too, without the terminal.)
 
-Either way, to start it at login: System Settings → General → Login Items → add
-`DisplayWave.app`.
+Either way, to have it start automatically: open the menu and click **Start at
+Login**.
 
 ### Or hand it to Claude
 
@@ -77,9 +78,10 @@ If you'd rather not touch a terminal, paste this into [Claude Code](https://clau
 and it will do the whole thing:
 
 > Clone https://github.com/kah-ve/DisplayWave and set it up on my Mac: build it with
-> ./build.sh, launch DisplayWave.app, and add it to my Login Items so it starts
-> automatically. Then tell me which of my monitors support hardware backlight
-> control and which will use software dimming, and what the difference means.
+> ./build.sh and launch DisplayWave.app. Remind me to click "Start at Login" in its
+> menu so it starts automatically. Then tell me which of my monitors support
+> hardware backlight control and which will use software dimming, and what the
+> difference means.
 
 ## Scenes
 
