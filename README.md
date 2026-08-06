@@ -17,10 +17,10 @@ name, with:
   applied the same way System Settings does, so they survive restarts.
 - **A power button** — disconnects that display; click it again in the "Turned off"
   section to bring it back
-- **Brightness** — slider plus 25 / 50 / 75 / 100% presets. On monitors that answer
-  DDC this drives the actual backlight; on the rest it dims the image on the GPU and
-  the label reads *Brightness · software*
-- **Warmth** — slider plus 0 / 25 / 50 / 75 / 100% presets
+- **Brightness** — slider, −5/+5 nudge buttons, and 35 / 50 / 75 / 100% presets. On
+  monitors that answer DDC this drives the actual backlight; on the rest it dims the
+  image on the GPU and the label reads *Brightness · software*
+- **Warmth** — slider, −5/+5 nudge buttons, and 0 / 25 / 50 / 75 / 100% presets
 
 At the bottom, **scenes** set brightness and warmth on every display at once:
 
