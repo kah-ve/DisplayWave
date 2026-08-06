@@ -7,11 +7,8 @@
 A minimal, free, open-source menu bar app for controlling external monitors on macOS —
 power, brightness, warmth, resolution and refresh rate, all from one clean menu.
 
-It exists because the two usual options both fall short: DDC-based apps
-(MonitorControl, Lunar) do nothing on monitors that don't answer DDC, and the apps
-that work everywhere paywall the useful parts. DisplayWave does both — real hardware
-control where the monitor supports it, OS-level control everywhere else — and it's
-entirely free.
+It exists because the other options are either paywalled and too complicated with features
+or they don't handle it all in one app. DisplayWave is free and open source. Enjoy!
 
 <img src="assets/menu.png" align="right" width="280" alt="The DisplayWave menu: scenes at the top, a card per monitor with brightness and warmth controls, turned-off displays, and utility items">
 
