@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 700 400">
+  <!-- The DisplayWave wave-W mark: two interlocking V strokes riding a swoosh,
+       colored to match the cyan of the wordmark. -->
+  <defs>
+    <linearGradient id="wave" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#9beeff"/>
+      <stop offset="0.45" stop-color="#35c8e8"/>
+      <stop offset="1" stop-color="#0e7fa8"/>
+    </linearGradient>
+    <linearGradient id="deep" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a5a6e"/>
+      <stop offset="1" stop-color="#0b1d27"/>
+    </linearGradient>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- The swoosh: a low wave flowing through both troughs and out to the sides. -->
+  <path d="M 25 195
+           C 120 190, 155 322, 237 322
+           C 300 322, 320 205, 350 195
+           C 380 205, 400 322, 463 322
+           C 545 322, 580 190, 675 195"
+        fill="none" stroke="url(#wave)" stroke-width="26" stroke-linecap="round"
+        opacity="0.85"/>
+
+  <!-- Left V, in the deep teal of the mark's shadowed strokes. -->
+  <path d="M 165 90
+           C 192 175, 208 268, 236 318
+           C 270 245, 320 160, 362 96"
+        fill="none" stroke="url(#deep)" stroke-width="36" stroke-linecap="round"
+        stroke-linejoin="round"/>
+
+  <!-- Right V, bright cyan, its left arm crossing the first V. -->
+  <path d="M 338 96
+           C 372 160, 420 245, 464 318
+           C 492 268, 508 175, 535 90"
+        fill="none" stroke="url(#wave)" stroke-width="36" stroke-linecap="round"
+        stroke-linejoin="round" filter="url(#glow)"/>
+</svg>

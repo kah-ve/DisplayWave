@@ -49,11 +49,39 @@ struct Scene {
     let warmth: Double
 }
 
-let scenes = [
+let defaultScenes = [
     Scene(name: "Day", brightness: 1.0, warmth: 0.0),
     Scene(name: "Evening", brightness: 0.70, warmth: 0.40),
-    Scene(name: "Night", brightness: 0.40, warmth: 0.80),
+    Scene(name: "Night", brightness: 0.35, warmth: 0.80),
 ]
+
+/// Scene values are editable via "Edit Scenes…"; edits are stored as overrides on
+/// the defaults, so resetting is just removing the overrides.
+final class SceneStore {
+    static let shared = SceneStore()
+    private let key = "scenes"
+    private(set) var scenes: [Scene] = defaultScenes
+
+    private init() {
+        if let raw = UserDefaults.standard.dictionary(forKey: key) as? [String: [Double]] {
+            scenes = defaultScenes.map { s in
+                guard let v = raw[s.name], v.count == 2 else { return s }
+                return Scene(name: s.name, brightness: v[0], warmth: v[1])
+            }
+        }
+    }
+
+    func update(index: Int, brightness: Double, warmth: Double) {
+        scenes[index] = Scene(name: scenes[index].name, brightness: brightness, warmth: warmth)
+        let raw = Dictionary(uniqueKeysWithValues: scenes.map { ($0.name, [$0.brightness, $0.warmth]) })
+        UserDefaults.standard.set(raw, forKey: key)
+    }
+
+    func reset() {
+        scenes = defaultScenes
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+}
 
 // MARK: - Display modes
 
@@ -546,7 +574,7 @@ final class SceneRow: FlippedView {
     private let control: NSSegmentedControl
 
     override init(frame: NSRect) {
-        control = NSSegmentedControl(labels: scenes.map(\.name), trackingMode: .momentary,
+        control = NSSegmentedControl(labels: SceneStore.shared.scenes.map(\.name), trackingMode: .momentary,
                                      target: nil, action: nil)
         super.init(frame: NSRect(x: 0, y: 0, width: DisplayCard.width, height: 54))
         let pad: CGFloat = 16
@@ -566,7 +594,7 @@ final class SceneRow: FlippedView {
     required init?(coder: NSCoder) { nil }
 
     @objc private func pick() {
-        let scene = scenes[control.selectedSegment]
+        let scene = SceneStore.shared.scenes[control.selectedSegment]
         for d in onlineDisplays() where d.active {
             var s = Store.shared[d.name]
             s.brightness = scene.brightness
@@ -575,6 +603,95 @@ final class SceneRow: FlippedView {
             apply(d)
         }
         AppDelegate.shared?.refreshVisibleCards()
+    }
+}
+
+// MARK: - Scene editor
+
+// A small window for tuning what each scene means. Changes save as they're made;
+// they take effect the next time a scene is clicked.
+final class SceneEditorView: FlippedView {
+    private var brightnessSliders: [NSSlider] = []
+    private var warmthSliders: [NSSlider] = []
+    private var brightnessReadouts: [NSTextField] = []
+    private var warmthReadouts: [NSTextField] = []
+
+    init() {
+        let width: CGFloat = 380
+        let sceneCount = SceneStore.shared.scenes.count
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 16 + CGFloat(sceneCount) * 88 + 40))
+        let pad: CGFloat = 16
+
+        for (i, scene) in SceneStore.shared.scenes.enumerated() {
+            let y0 = 16 + CGFloat(i) * 88
+
+            let name = label(scene.name, size: 13, weight: .semibold)
+            name.frame = NSRect(x: pad, y: y0, width: 200, height: 17)
+            addSubview(name)
+
+            addRow(title: "Brightness", value: scene.brightness, minValue: 0.15,
+                   y: y0 + 22, pad: pad, width: width, tag: i,
+                   sliders: &brightnessSliders, readouts: &brightnessReadouts)
+            addRow(title: "Warmth", value: scene.warmth, minValue: 0.0,
+                   y: y0 + 46, pad: pad, width: width, tag: i,
+                   sliders: &warmthSliders, readouts: &warmthReadouts)
+        }
+
+        let hint = label("Scenes apply to every display at once", size: 10, color: .tertiaryLabelColor)
+        hint.frame = NSRect(x: pad, y: frame.height - 32, width: 210, height: 14)
+        addSubview(hint)
+
+        let reset = NSButton(title: "Reset Scenes", target: self, action: #selector(resetScenes))
+        reset.bezelStyle = .rounded
+        reset.controlSize = .small
+        reset.frame = NSRect(x: width - pad - 110, y: frame.height - 38, width: 110, height: 24)
+        addSubview(reset)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    private func addRow(title: String, value: Double, minValue: Double, y: CGFloat,
+                        pad: CGFloat, width: CGFloat, tag: Int,
+                        sliders: inout [NSSlider], readouts: inout [NSTextField]) {
+        let caption = label(title, size: 11, color: .secondaryLabelColor)
+        caption.frame = NSRect(x: pad, y: y + 2, width: 70, height: 14)
+        addSubview(caption)
+
+        let slider = NSSlider()
+        slider.minValue = minValue
+        slider.maxValue = 1.0
+        slider.doubleValue = value
+        slider.isContinuous = true
+        slider.tag = tag
+        slider.target = self
+        slider.action = #selector(sliderChanged(_:))
+        slider.frame = NSRect(x: pad + 76, y: y, width: width - pad * 2 - 76 - 46, height: 19)
+        addSubview(slider)
+        sliders.append(slider)
+
+        let readout = label(percentString(value), size: 11, color: .secondaryLabelColor, align: .right)
+        readout.frame = NSRect(x: width - pad - 42, y: y + 2, width: 42, height: 14)
+        addSubview(readout)
+        readouts.append(readout)
+    }
+
+    @objc private func sliderChanged(_ sender: NSSlider) {
+        let i = sender.tag
+        SceneStore.shared.update(index: i,
+                                 brightness: brightnessSliders[i].doubleValue,
+                                 warmth: warmthSliders[i].doubleValue)
+        brightnessReadouts[i].stringValue = percentString(brightnessSliders[i].doubleValue)
+        warmthReadouts[i].stringValue = percentString(warmthSliders[i].doubleValue)
+    }
+
+    @objc private func resetScenes() {
+        SceneStore.shared.reset()
+        for (i, scene) in SceneStore.shared.scenes.enumerated() {
+            brightnessSliders[i].doubleValue = scene.brightness
+            warmthSliders[i].doubleValue = scene.warmth
+            brightnessReadouts[i].stringValue = percentString(scene.brightness)
+            warmthReadouts[i].stringValue = percentString(scene.warmth)
+        }
     }
 }
 
@@ -633,6 +750,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let online = onlineDisplays()
         let activeCount = online.filter(\.active).count
 
+        // Scenes first: the one-click action people reach for most often.
+        if activeCount > 0 {
+            let scenesItem = NSMenuItem()
+            scenesItem.view = SceneRow(frame: .zero)
+            menu.addItem(scenesItem)
+            menu.addItem(.separator())
+        }
+
         visibleCards.removeAll()
         for d in online where d.active {
             let card = DisplayCard(display: d, menu: menu, canPowerOff: activeCount > 1)
@@ -662,13 +787,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(.separator())
         }
 
-        if activeCount > 0 {
-            let scenesItem = NSMenuItem()
-            scenesItem.view = SceneRow(frame: .zero)
-            menu.addItem(scenesItem)
-            menu.addItem(.separator())
-        }
-
         let awake = NSMenuItem(title: "Keep Mac Awake", action: #selector(toggleKeepAwake), keyEquivalent: "")
         awake.target = self
         awake.state = KeepAwake.shared.active ? .on : .off
@@ -678,10 +796,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(awake)
         menu.addItem(.separator())
 
-        let recheck = NSMenuItem(title: "Re-check Backlight Support", action: #selector(recheckHardware), keyEquivalent: "")
-        recheck.target = self
-        recheck.toolTip = "Probes monitors again — use after changing a cable, enabling DDC/CI in a monitor's menu, or if brightness stops responding"
-        menu.addItem(recheck)
+        let arrange = NSMenuItem(title: "Arrange Displays…", action: #selector(arrangeDisplays), keyEquivalent: "")
+        arrange.target = self
+        arrange.toolTip = "Opens macOS display settings, where displays can be arranged"
+        menu.addItem(arrange)
+
+        let editScenes = NSMenuItem(title: "Edit Scenes…", action: #selector(openSceneEditor), keyEquivalent: "")
+        editScenes.target = self
+        editScenes.toolTip = "Change what Day, Evening and Night set brightness and warmth to"
+        menu.addItem(editScenes)
+        menu.addItem(.separator())
+
+        let resync = NSMenuItem(title: "Resync Monitors", action: #selector(recheckHardware), keyEquivalent: "")
+        resync.target = self
+        resync.toolTip = "Probes every monitor again — use after changing a cable, enabling DDC/CI in a monitor's menu, or if a monitor stops responding"
+        menu.addItem(resync)
 
         let reset = NSMenuItem(title: "Reset All to Default", action: #selector(resetAll), keyEquivalent: "")
         reset.target = self
@@ -720,6 +849,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         KeepAwake.shared.toggle()
     }
 
+    @objc private func arrangeDisplays() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension")!)
+    }
+
+    private var sceneEditor: NSWindow?
+
+    @objc private func openSceneEditor() {
+        if sceneEditor == nil {
+            let view = SceneEditorView()
+            let window = NSWindow(contentRect: NSRect(origin: .zero, size: view.frame.size),
+                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            window.title = "Edit Scenes"
+            window.contentView = view
+            window.isReleasedWhenClosed = false
+            window.center()
+            sceneEditor = window
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        sceneEditor?.makeKeyAndOrderFront(nil)
+    }
+
     @objc private func recheckHardware() {
         Capabilities.shared.forget()
         Capabilities.shared.probeUnknown(displays: onlineDisplays().filter(\.active)) {
@@ -738,9 +888,9 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
     init(path: String) { self.path = path }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let rows: [NSView] = onlineDisplays().filter(\.active)
+        let rows: [NSView] = [SceneRow(frame: .zero)]
+            + onlineDisplays().filter(\.active)
             .map { DisplayCard(display: $0, menu: nil, canPowerOff: true) }
-            + [SceneRow(frame: .zero)]
         let height = rows.reduce(0) { $0 + $1.frame.height + 1 }
 
         let canvas = FlippedView(frame: NSRect(x: 0, y: 0, width: DisplayCard.width, height: height))
