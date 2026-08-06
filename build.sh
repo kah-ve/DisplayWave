@@ -34,4 +34,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+# Re-sign ad hoc after replacing the binary; without this macOS can kill the app
+# at launch with "Code Signature Invalid" once the old signature is cached.
+codesign --force -s - "$APP"
+
 echo "Built $APP — run: open $APP"

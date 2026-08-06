@@ -217,6 +217,32 @@ final class Capabilities {
         return done.wait(timeout: .now() + 2.5) == .success && box.ok
     }
 
+    /// Re-resolves the service for every display already known to be hardware.
+    /// Display reconfigurations — mode changes, sleep, replugging — tear down the
+    /// old service objects, and writes through a stale one silently vanish. This is
+    /// registry-only, no DDC traffic, so it's safe to run on every reconfiguration.
+    func reattachServices(displays: [Display], completion: @escaping () -> Void) {
+        let hardware = displays.filter { mode(for: $0.name) == .hardware }
+        guard !hardware.isEmpty else { DispatchQueue.main.async(execute: completion); return }
+        DispatchQueue.global(qos: .utility).async {
+            for d in hardware {
+                if let service = ddcService(for: d) {
+                    self.store(d.name, .hardware, service)
+                }
+            }
+            DispatchQueue.main.async(execute: completion)
+        }
+    }
+
+    /// Same, for one display, synchronously — used to retry a write that just failed.
+    func reattach(name: String, id: CGDirectDisplayID) -> IOAVService? {
+        guard mode(for: name) == .hardware else { return nil }
+        let placeholder = Display(id: id, name: name, active: true, width: 0, height: 0, refresh: 0)
+        guard let service = ddcService(for: placeholder) else { return nil }
+        store(name, .hardware, service)
+        return service
+    }
+
     /// Clears everything so monitors are re-probed — for after a cable or setting change.
     func forget() {
         lock.lock()
@@ -239,7 +265,7 @@ final class Backlight {
     private var latest: [CGDirectDisplayID: Int] = [:]
     private var busy: Set<CGDirectDisplayID> = []
 
-    func set(percent: Double, id: CGDirectDisplayID, service: IOAVService) {
+    func set(percent: Double, id: CGDirectDisplayID, name: String, service: IOAVService) {
         let value = Int((max(0, min(1, percent)) * 100).rounded())
         lock.lock()
         latest[id] = value
@@ -247,10 +273,12 @@ final class Backlight {
         if !alreadyDraining { busy.insert(id) }
         lock.unlock()
         guard !alreadyDraining else { return }
-        queue.async { self.drain(id: id, service: service) }
+        queue.async { self.drain(id: id, name: name, service: service) }
     }
 
-    private func drain(id: CGDirectDisplayID, service: IOAVService) {
+    private func drain(id: CGDirectDisplayID, name: String, service: IOAVService) {
+        var service = service
+        var reattached = false
         while true {
             lock.lock()
             guard let value = latest.removeValue(forKey: id) else {
@@ -259,7 +287,16 @@ final class Backlight {
                 return
             }
             lock.unlock()
-            ddcWrite(service, vcp: vcpLuminance, value: value)
+            if !ddcWrite(service, vcp: vcpLuminance, value: value), !reattached {
+                // A failed write usually means the service went stale after a display
+                // reconfiguration. Re-resolve it once and retry; this only runs for
+                // monitors that have already proven they answer DDC.
+                reattached = true
+                if let fresh = Capabilities.shared.reattach(name: name, id: id) {
+                    service = fresh
+                    ddcWrite(service, vcp: vcpLuminance, value: value)
+                }
+            }
         }
     }
 }

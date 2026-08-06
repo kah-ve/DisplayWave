@@ -112,8 +112,15 @@ physically unplugged and replugged. So detection:
 - runs on a detached thread that is **abandoned rather than killed** if it times out
 - never retries a channel that already failed
 
+A display reconfiguration — a mode change, sleep, replugging — also tears down the
+DDC service handles, and writes through a stale handle silently vanish. The app
+re-resolves handles after every reconfiguration and wake (registry-only, no DDC
+traffic), and if a backlight write still fails it re-resolves once more and retries,
+so brightness keeps working without manual intervention.
+
 Use **Re-check Backlight Support** after changing a cable or enabling DDC/CI in a
-monitor's own on-screen menu.
+monitor's own on-screen menu — that's the one case that needs a fresh probe rather
+than a fresh handle.
 
 ### Notes
 
