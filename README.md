@@ -1,7 +1,14 @@
+<p align="center">
+  <img src="assets/banner.png" alt="DisplayWave — multi-monitor management for Mac">
+</p>
+
 # DisplayWave
 
 A small macOS menu bar app that turns external monitors on and off, and adjusts their
 brightness and warmth — including monitors that don't support DDC.
+
+The wave-W mark also lives in `assets/` as a square logo (`logo.png`) and a vector
+version (`logo.svg`) colored to match the wordmark.
 
 Built because the usual approach (DDC over the cable) only worked on one of three
 monitors, and the feature that works everywhere is paywalled in BetterDisplay Pro.
@@ -22,13 +29,18 @@ name, with:
   image on the GPU and the label reads *Brightness · software*
 - **Warmth** — slider, −5/+5 nudge buttons, and 0 / 25 / 50 / 75 / 100% presets
 
-At the bottom, **scenes** set brightness and warmth on every display at once:
+At the top, **scenes** set brightness and warmth on every display at once. The
+defaults are below; **Edit Scenes…** changes what each one means, and edits persist
+until reset:
 
 | Scene | Brightness | Warmth |
 |---|---|---|
 | Day | 100% | 0% |
 | Evening | 70% | 40% |
-| Night | 40% | 80% |
+| Night | 35% | 80% |
+
+**Arrange Displays…** jumps to macOS's own display settings — arrangement is one
+thing the system already does well, so the app links to it instead of rebuilding it.
 
 **Keep Mac Awake** holds a power-management assertion so the Mac and its displays
 don't sleep — the same trick as `caffeinate`. It is deliberately session-only: it
@@ -118,9 +130,9 @@ re-resolves handles after every reconfiguration and wake (registry-only, no DDC
 traffic), and if a backlight write still fails it re-resolves once more and retries,
 so brightness keeps working without manual intervention.
 
-Use **Re-check Backlight Support** after changing a cable or enabling DDC/CI in a
-monitor's own on-screen menu — that's the one case that needs a fresh probe rather
-than a fresh handle.
+Use **Resync Monitors** after changing a cable or enabling DDC/CI in a monitor's own
+on-screen menu — that's the one case that needs a fresh probe rather than a fresh
+handle.
 
 ### Notes
 
