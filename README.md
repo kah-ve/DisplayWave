@@ -43,6 +43,8 @@ Requires macOS 13+ and the Xcode command line tools (`xcode-select --install`).
 Hardware backlight control uses the Apple Silicon display driver; everything else
 also works on Intel, where brightness falls back to GPU dimming.
 
+**Option 1 — build from source** (recommended)
+
 ```bash
 git clone https://github.com/kah-ve/DisplayWave.git
 cd DisplayWave
@@ -50,10 +52,24 @@ cd DisplayWave
 open DisplayWave.app
 ```
 
-To start it at login: System Settings → General → Login Items → add `DisplayWave.app`.
-
 Because you build it on your own machine, there is no Gatekeeper warning to fight —
 quarantine only applies to downloaded binaries.
+
+**Option 2 — download a release**
+
+Grab the zip from [Releases](https://github.com/kah-ve/DisplayWave/releases), unzip
+it, and move `DisplayWave.app` to Applications. macOS will refuse to open it
+("unidentified developer") because the app isn't notarized with Apple — clear the
+quarantine flag and it opens normally:
+
+```bash
+xattr -cr /Applications/DisplayWave.app
+```
+
+(Right-click → Open → Open works too, without the terminal.)
+
+Either way, to start it at login: System Settings → General → Login Items → add
+`DisplayWave.app`.
 
 ### Or hand it to Claude
 
