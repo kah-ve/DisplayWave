@@ -268,12 +268,13 @@ func applyGamma(_ id: CGDirectDisplayID, brightness: Double, warmth: Double, flo
 /// session-only and quitting or restarting always brings the screens back.
 final class Blackout {
     static let shared = Blackout()
-    /// A faint glow: dark enough not to disturb a dark room, light enough that the
-    /// menu can still be found to switch it off.
-    static let level = 0.05
+    /// All the way off: backlight at its minimum and the image fully black. The
+    /// displays stay awake and the Mac keeps working — there is simply nothing to
+    /// see until a key or a click brings it back.
+    static let level = 0.0
 
-    /// Keys pressed within this long of switching blackout on don't count as the
-    /// escape — otherwise driving the menu by keyboard would undo it instantly.
+    /// Input within this long of switching blackout on doesn't count as the escape —
+    /// otherwise the very click that turned it on would undo it instantly.
     private static let grace: TimeInterval = 1.5
 
     private(set) var active = false
@@ -282,7 +283,7 @@ final class Blackout {
 
     func toggle() {
         active.toggle()
-        if active { watchForKeypress() } else { watchdog?.invalidate(); watchdog = nil }
+        if active { watchForInput() } else { watchdog?.invalidate(); watchdog = nil }
         applyAll()
     }
 
@@ -297,16 +298,18 @@ final class Blackout {
         applyAll()
     }
 
-    /// Watches for a keypress without an event tap — asking the system how long the
-    /// keyboard has been idle needs no permissions, where monitoring keys does.
-    /// Mouse movement is ignored on purpose: a nudged desk shouldn't light the room.
-    private func watchForKeypress() {
+    /// Watches for a keypress or a click without an event tap — asking the system
+    /// how long input has been idle needs no permissions, where monitoring events
+    /// does. Both count, so there are two ways back from a black screen. Mouse
+    /// *movement* is ignored on purpose: a nudged desk shouldn't light the room.
+    private func watchForInput() {
         startedAt = Date()
         let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self, self.active else { return }
             let elapsed = Date().timeIntervalSince(self.startedAt)
-            let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState,
-                                                               eventType: .keyDown)
+            let idle = min(
+                CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown),
+                CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseDown))
             if idle < elapsed - Self.grace { self.deactivate() }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -1060,6 +1063,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { _ in
+            // Waking the Mac means someone is back at the desk; never wake to black.
+            Blackout.shared.deactivate()
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { resyncAndApply() }
         }
     }
@@ -1139,7 +1144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         blackout.target = self
         blackout.state = Blackout.shared.active ? .on : .off
         blackout.image = NSImage(systemSymbolName: "moon.zzz.fill", accessibilityDescription: nil)
-        blackout.toolTip = "Dims every display to a faint glow — darker than the sliders allow — for leaving screens on overnight. Press any key to bring them back."
+        blackout.toolTip = "Takes every display fully dark while the Mac keeps running — for leaving it working overnight. Press any key or click to bring the screens back exactly as they were."
         menu.addItem(blackout)
         menu.addItem(.separator())
 

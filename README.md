@@ -34,9 +34,10 @@ or they don't handle it all in one app. DisplayWave is free and open source. Enj
 - **Keep Mac Awake** — caffeinate with a duration: *Always*, or a countdown you
   build with −5h / −1h / +1h / +5h, showing the time left. Deliberately
   session-only, so a forgotten toggle can't outlive the app.
-- **Blackout** — takes every display down to a faint glow, far below what the
-  sliders allow, and goes fully warm. For leaving screens on overnight without
-  lighting up the room. Press any key to bring them back exactly as they were.
+- **Blackout** — takes every display fully dark, backlight at its minimum and the
+  image at black, while the Mac keeps running. For leaving it working overnight
+  without lighting the room. Press any key or click and the screens come back
+  exactly as they were.
 - **Start at Login** — one click in the menu, no digging through System Settings.
 - Settings are remembered per monitor and reapplied automatically after sleep,
   unplugging, or display changes — which macOS would otherwise wipe.
@@ -200,12 +201,13 @@ handle.
 - The app refuses to turn off the last active display.
 - Brightness has a floor — 15% on gamma-only monitors, 5% on DDC ones — so a screen
   can never go fully black and leave no way to reach the menu. **Blackout** is the
-  deliberate exception, which is why it is session-only and why any keypress leaves
-  it: quitting, restarting, or touching the keyboard always gets the screens back.
-- Blackout watches for a keypress by asking the system how long the keyboard has
-  been idle, which needs no permissions — unlike monitoring keys, which would demand
-  an accessibility grant. Mouse movement is ignored on purpose, so a nudged desk
-  doesn't light the room.
+  deliberate exception: it goes all the way to black, so it has four ways out. Any
+  keypress or click leaves it, waking the Mac leaves it, quitting the app leaves it,
+  and macOS itself reverts the gamma if the app ever dies.
+- Blackout detects input by asking the system how long the keyboard and mouse button
+  have been idle, which needs no permissions — unlike monitoring events, which would
+  demand an accessibility grant. Mouse *movement* is ignored on purpose, so a nudged
+  desk doesn't light the room.
 - macOS reverts a process's gamma changes when that process exits, which is why the
   app has to keep running for its settings to hold.
 - These are private Apple APIs: not App Store distributable, and Apple can change
