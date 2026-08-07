@@ -19,7 +19,9 @@ or they don't handle it all in one app. DisplayWave is free and open source. Enj
   monitor gets no say. Turned-off displays wait in their own menu section.
 - **Brightness** — on monitors that support DDC this drives the actual backlight,
   exactly like the monitor's own buttons. On monitors that don't, it dims the image
-  on the GPU instead, and the label says so (*Brightness · software*).
+  on the GPU instead, and the label says so (*Brightness · software*). At the bottom
+  of the range both are used together, so a DDC monitor can still get properly dark
+  even when its own backlight bottoms out too bright.
 - **Warmth** — shifts the picture warmer for evenings, like Night Shift but per
   monitor and with presets.
 - **Scenes** — Day / Evening / Night set brightness and warmth on every display in
@@ -28,8 +30,9 @@ or they don't handle it all in one app. DisplayWave is free and open source. Enj
   Switching prefers HiDPI variants and keeps your refresh rate where possible.
 - **Presets and nudge buttons** — one-click percentages plus −5/+5 fine adjustment,
   per control, per monitor.
-- **Keep Mac Awake** — a caffeinate toggle. Deliberately session-only, so a
-  forgotten toggle can't outlive the app.
+- **Keep Mac Awake** — caffeinate with a duration: *Always*, or a countdown you
+  build with −5h / −1h / +1h / +5h, showing the time left. Deliberately
+  session-only, so a forgotten toggle can't outlive the app.
 - **Start at Login** — one click in the menu, no digging through System Settings.
 - Settings are remembered per monitor and reapplied automatically after sleep,
   unplugging, or display changes — which macOS would otherwise wipe.
@@ -47,7 +50,7 @@ brightness + warmth, per monitor, working even on DDC-less monitors, minimal, fr
 | [Lunar](https://lunar.fyi) | Adaptive brightness synced to ambient light or the built-in display | The adaptive features are paid, and hardware control is DDC-centric. |
 | f.lux / Night Shift | Automatic time-of-day color temperature | Applies to all displays equally; no per-monitor warmth, no brightness or power. |
 | [DisplayBuddy](https://displaybuddy.app) | Polished presets across many monitors | Paid, and hardware control is DDC-centric with the same gamma fallback this app uses — just not free. |
-| Amphetamine / `caffeinate` | Keep-awake with schedules and triggers | DisplayWave has one keep-awake toggle, sitting next to the monitor controls where you already are. |
+| Amphetamine / `caffeinate` | Keep-awake with schedules and app triggers | DisplayWave has a keep-awake with a simple duration, sitting next to the monitor controls where you already are. |
 
 If you want keyboard-key brightness on DDC monitors, use MonitorControl. If you
 want virtual displays or EDID overrides, buy BetterDisplay. If you want a small
@@ -140,9 +143,17 @@ fails, it fails completely and no software can fix it.
 
 DisplayWave uses DDC for brightness when a monitor supports it, because only that
 genuinely lowers light output, and falls back to gamma otherwise. Power and warmth
-always take the OS-level route, so they work on every monitor. When a monitor does
-support DDC the two are never stacked: the backlight does the dimming and gamma
-stays at full, so the picture doesn't end up doubly dark.
+always take the OS-level route, so they work on every monitor.
+
+In the normal range the two are not stacked — the backlight does the dimming and
+gamma stays at full, so the picture isn't doubly dark. Below 25% they stack on
+purpose: the backlight keeps going down to the monitor's own minimum *and* gamma
+joins in, bottoming out at 35%. Many monitors' lowest backlight setting is still
+bright in a dark room, and this is the only way past it.
+
+Backlight values are scaled to the maximum the monitor reports over DDC (usually
+100, but the standard doesn't require it) and never written past it. The app asks
+for nothing the hardware hasn't said it accepts.
 
 ### Detecting DDC support safely
 
@@ -172,8 +183,8 @@ handle.
 - Power changes are session-scoped, so **a restart always restores every display**
   regardless of app state.
 - The app refuses to turn off the last active display.
-- Software brightness has a floor of 15% so a screen can never go fully black;
-  hardware brightness can go to 5%.
+- Brightness has a floor — 15% on gamma-only monitors, 5% on DDC ones — so a screen
+  can never go fully black and leave no way to reach the menu.
 - These are private Apple APIs: not App Store distributable, and Apple can change
   them in any macOS release.
 
