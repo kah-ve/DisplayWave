@@ -280,10 +280,20 @@ final class Blackout {
     private(set) var active = false
     private var startedAt = Date()
     private var watchdog: Timer?
+    private var lastSleepRequest = Date.distantPast
 
     func toggle() {
         active.toggle()
-        if active { watchForInput() } else { watchdog?.invalidate(); watchdog = nil }
+        // Keep Mac Awake normally stops the screens sleeping, which would fight this.
+        KeepAwake.shared.updateDisplayHold()
+        if active {
+            watchForInput()
+            sleepDisplays()
+        } else {
+            watchdog?.invalidate()
+            watchdog = nil
+            wakeDisplays()
+        }
         applyAll()
     }
 
@@ -295,7 +305,26 @@ final class Blackout {
         active = false
         watchdog?.invalidate()
         watchdog = nil
+        KeepAwake.shared.updateDisplayHold()
+        wakeDisplays()
         applyAll()
+    }
+
+    /// Puts the displays into standby. This is the only way to darken a monitor that
+    /// doesn't answer DDC: the backlight goes off because the monitor sleeps, not
+    /// because it was asked to dim. The displays stay connected, so nothing moves.
+    private func sleepDisplays() {
+        lastSleepRequest = Date()
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+        task.arguments = ["displaysleepnow"]
+        try? task.run()
+    }
+
+    private func wakeDisplays() {
+        var id = IOPMAssertionID(0)
+        IOPMAssertionDeclareUserActivity("DisplayWave: leaving blackout" as CFString,
+                                         kIOPMUserActiveLocal, &id)
     }
 
     /// Watches for a keypress or a click without an event tap — asking the system
@@ -310,7 +339,20 @@ final class Blackout {
             let idle = min(
                 CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown),
                 CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseDown))
-            if idle < elapsed - Self.grace { self.deactivate() }
+            if idle < elapsed - Self.grace {
+                self.deactivate()
+                return
+            }
+            // A nudged mouse wakes the screens without meaning to, so put them back.
+            // Recent mouse movement is the signal: CGDisplayIsAsleep keeps reporting
+            // external monitors as awake even once they're in standby, so it can't
+            // be used to tell. They come back black meanwhile, blackout being still
+            // on.
+            let moved = CGEventSource.secondsSinceLastEventType(.combinedSessionState,
+                                                                eventType: .mouseMoved)
+            if moved < 3, Date().timeIntervalSince(self.lastSleepRequest) > 5 {
+                self.sleepDisplays()
+            }
         }
         RunLoop.main.add(timer, forMode: .common)
         watchdog = timer
@@ -412,7 +454,12 @@ final class KeepAwake {
     static let shared = KeepAwake()
     static let maxHours: Double = 24
 
-    private var assertion = IOPMAssertionID(0)
+    // Two separate assertions: one keeps the Mac itself running, the other keeps the
+    // screens lit. Blackout drops the second one so the displays can sleep while the
+    // machine carries on working.
+    private var systemAssertion = IOPMAssertionID(0)
+    private var displayAssertion = IOPMAssertionID(0)
+    private var holdingDisplay = false
     private var timer: Timer?
     private(set) var active = false
     /// When the session ends. Nil while active means no time limit.
@@ -428,26 +475,44 @@ final class KeepAwake {
         return minutes == 0 ? "\(hours)h left" : "\(hours)h \(minutes)m left"
     }
 
+    // Plain ASCII: this string is what `pmset -g assertions` prints.
+    private static let reason = "DisplayWave: Keep Mac Awake"
+
+    private static func hold(_ type: String, _ id: inout IOPMAssertionID) -> Bool {
+        IOPMAssertionCreateWithName(type as CFString,
+                                    IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                                    reason as CFString, &id) == kIOReturnSuccess
+    }
+
     func start(hours: Double?) {
         if !active {
-            guard IOPMAssertionCreateWithName(
-                "PreventUserIdleDisplaySleep" as CFString,
-                IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                // Plain ASCII: this string is what `pmset -g assertions` prints.
-                "DisplayWave: Keep Mac Awake" as CFString,
-                &assertion) == kIOReturnSuccess else { return }
+            guard Self.hold("PreventUserIdleSystemSleep", &systemAssertion) else { return }
             active = true
         }
+        updateDisplayHold()
         expiry = hours.map { Date(timeIntervalSinceNow: $0 * 3600) }
         rearm()
     }
 
     func stop() {
         guard active else { return }
-        IOPMAssertionRelease(assertion)
+        IOPMAssertionRelease(systemAssertion)
         active = false
+        updateDisplayHold()
         expiry = nil
         rearm()
+    }
+
+    /// The screens are kept awake only while keep-awake is on and blackout is off.
+    func updateDisplayHold() {
+        let wanted = active && !Blackout.shared.active
+        guard wanted != holdingDisplay else { return }
+        if wanted {
+            holdingDisplay = Self.hold("PreventUserIdleDisplaySleep", &displayAssertion)
+        } else {
+            IOPMAssertionRelease(displayAssertion)
+            holdingDisplay = false
+        }
     }
 
     /// Adds or removes time. Adding while off starts a timed session; removing the
