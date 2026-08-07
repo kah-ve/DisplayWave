@@ -33,11 +33,13 @@ or they don't handle it all in one app. DisplayWave is free and open source. Enj
   adjustment, on every slider.
 - **Keep Mac Awake** — caffeinate with a duration: *Always*, or a countdown you
   build with −5h / −1h / +1h / +5h, showing the time left. Deliberately
-  session-only, so a forgotten toggle can't outlive the app.
-- **Blackout** — takes every display fully dark, backlight at its minimum and the
-  image at black, while the Mac keeps running. For leaving it working overnight
-  without lighting the room. Press any key or click and the screens come back
-  exactly as they were.
+  session-only, so a forgotten toggle can't outlive the app. It holds two separate
+  assertions — one for the Mac, one for the screens — so blackout can darken the
+  monitors while the machine keeps working.
+- **Blackout** — puts the monitors into standby so their backlights go out
+  completely, while the Mac stays awake and carries on working. This is the only way
+  to darken a monitor that doesn't answer DDC, and it needs no cooperation from the
+  monitor. Press any key or click and the screens come back exactly as they were.
 - **Start at Login** — one click in the menu, no digging through System Settings.
 - Settings are remembered per monitor and reapplied automatically after sleep,
   unplugging, or display changes — which macOS would otherwise wipe.
@@ -201,9 +203,15 @@ handle.
 - The app refuses to turn off the last active display.
 - Brightness has a floor — 15% on gamma-only monitors, 5% on DDC ones — so a screen
   can never go fully black and leave no way to reach the menu. **Blackout** is the
-  deliberate exception: it goes all the way to black, so it has four ways out. Any
-  keypress or click leaves it, waking the Mac leaves it, quitting the app leaves it,
-  and macOS itself reverts the gamma if the app ever dies.
+  deliberate exception: it goes all the way, so it has four ways out. Any keypress or
+  click leaves it, waking the Mac leaves it, quitting the app leaves it, and macOS
+  itself reverts the gamma if the app ever dies.
+- Blackout also sets gamma to black and the backlight to its minimum, not just
+  standby. That way a mouse nudge that wakes the screens doesn't light the room —
+  they wake up black, and are put back to sleep a moment later.
+- `CGDisplayIsAsleep` keeps reporting external monitors as awake even after they
+  enter standby, so it can't be used to tell whether they went dark. Recent mouse
+  movement is used as the signal instead.
 - Blackout detects input by asking the system how long the keyboard and mouse button
   have been idle, which needs no permissions — unlike monitoring events, which would
   demand an accessibility grant. Mouse *movement* is ignored on purpose, so a nudged
