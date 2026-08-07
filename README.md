@@ -10,7 +10,7 @@ power, brightness, warmth, resolution and refresh rate, all from one clean menu.
 It exists because the other options are either paywalled and too complicated with features
 or they don't handle it all in one app. DisplayWave is free and open source. Enjoy!
 
-<img src="assets/menu.png"  width="280" alt="The DisplayWave menu: scenes at the top, a card per monitor with brightness and warmth controls, turned-off displays, and utility items">
+<img src="assets/menu.png"  width="280" alt="The DisplayWave menu: presets at the top, a card per monitor with brightness and warmth controls, turned-off displays, and utility items">
 
 ## Features
 
@@ -23,13 +23,14 @@ or they don't handle it all in one app. DisplayWave is free and open source. Enj
   of the range both are used together, so a DDC monitor can still get properly dark
   even when its own backlight bottoms out too bright.
 - **Warmth** — shifts the picture warmer for evenings, like Night Shift but per
-  monitor and with presets.
-- **Scenes** — Day / Evening / Night set brightness and warmth on every display in
-  one click. Editable via *Edit Scenes…* to whatever values you like.
+  monitor.
+- **Presets** — Day / Evening / Night to start with, and you can save your own. A
+  preset remembers brightness and warmth *per monitor*, so one click puts the whole
+  desk back the way you had it. Add, rename and delete them in *Edit Presets…*.
 - **Resolution & refresh rate** — the mode line on each card is two dropdowns.
   Switching prefers HiDPI variants and keeps your refresh rate where possible.
-- **Presets and nudge buttons** — one-click percentages plus −5/+5 fine adjustment,
-  per control, per monitor.
+- **Quick percentages and nudge buttons** — one-click 35/50/75/100% plus −5/+5 fine
+  adjustment, on every slider.
 - **Keep Mac Awake** — caffeinate with a duration: *Always*, or a countdown you
   build with −5h / −1h / +1h / +5h, showing the time left. Deliberately
   session-only, so a forgotten toggle can't outlive the app.
@@ -109,16 +110,27 @@ and it will do the whole thing:
 > hardware backlight control and which will use software dimming, and what the
 > difference means.
 
-## Scenes
+## Presets
 
-| Scene | Brightness | Warmth |
+Presets sit at the top of the menu. Three come built in, applying to every display:
+
+| Preset | Brightness | Warmth |
 |---|---|---|
 | Day | 100% | 0% |
 | Evening | 70% | 40% |
 | Night | 35% | 80% |
 
-These are the defaults — *Edit Scenes…* changes what each one means, and edits
-persist until you reset them.
+**Edit Presets…** is where you make them yours:
+
+- **New from Current Settings** — set your monitors up how you like, then save that
+  arrangement as a preset. It records each monitor separately, so a preset can leave
+  one screen bright and another dim.
+- **Save** on an existing preset overwrites it with the current look.
+- Click a name to rename it; **✕** deletes it. **Restore Defaults** brings back the
+  original three.
+
+A preset only touches monitors it knows about, plus a fallback for any monitor it
+has never seen — so plugging in a new display doesn't leave it out.
 
 *Arrange Displays…* jumps to macOS's own display settings — arrangement is one thing
 the system already does well, so the app links to it instead of rebuilding it.
