@@ -143,14 +143,17 @@ enum BrightnessMode: String {
 final class Capabilities {
     static let shared = Capabilities()
     private let key = "brightnessMode"
+    private let maxKey = "brightnessMax"
     private let lock = NSLock()
     private var modes: [String: BrightnessMode] = [:]
+    private var maxima: [String: Int] = [:]
     private var servicesByName: [String: IOAVService] = [:]
 
     private init() {
         if let raw = UserDefaults.standard.dictionary(forKey: key) as? [String: String] {
             modes = raw.compactMapValues { BrightnessMode(rawValue: $0) }
         }
+        maxima = (UserDefaults.standard.dictionary(forKey: maxKey) as? [String: Int]) ?? [:]
     }
 
     func mode(for name: String) -> BrightnessMode {
@@ -163,13 +166,25 @@ final class Capabilities {
         return servicesByName[name]
     }
 
-    private func store(_ name: String, _ mode: BrightnessMode, _ service: IOAVService?) {
+    /// The largest luminance value this monitor says it accepts. Most report 100,
+    /// but the standard doesn't require it, and writing past a monitor's own
+    /// maximum is out of spec.
+    func maxLuminance(for name: String) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let max = maxima[name] ?? 0
+        return max > 0 ? max : 100
+    }
+
+    private func store(_ name: String, _ mode: BrightnessMode, _ service: IOAVService?, max: Int? = nil) {
         lock.lock()
         modes[name] = mode
         if let service { servicesByName[name] = service }
+        if let max, max > 0 { maxima[name] = max }
         let snapshot = modes.mapValues(\.rawValue)
+        let maxSnapshot = maxima
         lock.unlock()
         UserDefaults.standard.set(snapshot, forKey: key)
+        UserDefaults.standard.set(maxSnapshot, forKey: maxKey)
     }
 
     private func isKnown(_ name: String) -> Bool {
@@ -197,24 +212,28 @@ final class Capabilities {
                 if known {
                     continue  // already known to be software; don't touch its channel
                 }
-                let mode = Self.probe(service) ? BrightnessMode.hardware : .software
-                self.store(display.name, mode, mode == .hardware ? service : nil)
+                if let max = Self.probe(service) {
+                    self.store(display.name, .hardware, service, max: max)
+                } else {
+                    self.store(display.name, .software, nil)
+                }
             }
             DispatchQueue.main.async(execute: completion)
         }
     }
 
-    /// One read attempt, with a watchdog. On timeout the thread is left to finish on
-    /// its own — killing it mid-transaction is what strands a display.
-    private static func probe(_ service: IOAVService) -> Bool {
-        final class Box { var ok = false }
+    /// One read attempt, with a watchdog; returns the monitor's reported maximum
+    /// luminance, or nil if it doesn't answer. On timeout the thread is left to
+    /// finish on its own — killing it mid-transaction is what strands a display.
+    private static func probe(_ service: IOAVService) -> Int? {
+        final class Box { var max: Int? }
         let box = Box()
         let done = DispatchSemaphore(value: 0)
         Thread.detachNewThread {
-            box.ok = ddcRead(service, vcp: vcpLuminance) != nil
+            box.max = ddcRead(service, vcp: vcpLuminance)?.max
             done.signal()
         }
-        return done.wait(timeout: .now() + 2.5) == .success && box.ok
+        return done.wait(timeout: .now() + 2.5) == .success ? box.max : nil
     }
 
     /// Re-resolves the service for every display already known to be hardware.
@@ -247,9 +266,11 @@ final class Capabilities {
     func forget() {
         lock.lock()
         modes = [:]
+        maxima = [:]
         servicesByName = [:]
         lock.unlock()
         UserDefaults.standard.removeObject(forKey: key)
+        UserDefaults.standard.removeObject(forKey: maxKey)
     }
 }
 
@@ -265,8 +286,10 @@ final class Backlight {
     private var latest: [CGDirectDisplayID: Int] = [:]
     private var busy: Set<CGDirectDisplayID> = []
 
-    func set(percent: Double, id: CGDirectDisplayID, name: String, service: IOAVService) {
-        let value = Int((max(0, min(1, percent)) * 100).rounded())
+    /// `ceiling` is the monitor's own reported maximum; values are scaled into its
+    /// range and never sent past it.
+    func set(percent: Double, id: CGDirectDisplayID, name: String, service: IOAVService, ceiling: Int) {
+        let value = Swift.max(0, Swift.min(ceiling, Int((max(0, min(1, percent)) * Double(ceiling)).rounded())))
         lock.lock()
         latest[id] = value
         let alreadyDraining = busy.contains(id)

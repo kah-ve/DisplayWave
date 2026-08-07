@@ -202,15 +202,30 @@ func applyGamma(_ id: CGDirectDisplayID, brightness: Double, warmth: Double) {
                                   0, b * (1.0 - 0.45 * w), 1.0)
 }
 
+/// Where gamma starts helping the backlight out. A monitor's lowest backlight
+/// setting is often still bright in a dark room, so under this point the image is
+/// dimmed as well — that's what lets a DDC monitor get as dark as a gamma-only one.
+let backlightFloor = 0.25
+/// How far gamma is allowed to dim at the very bottom. Not lower: the screen has to
+/// stay readable enough to open the menu and turn it back up.
+let deepDimFloor = 0.35
+
 /// Applies a display's settings using whichever brightness mechanism it supports.
-/// On a monitor that answers DDC the backlight does the dimming and gamma is left at
-/// full brightness, so the two never stack into a doubly-dark picture.
+///
+/// On a monitor that answers DDC the backlight does the dimming and gamma stays at
+/// full, so the two don't stack into a doubly-dark picture in normal use. Below
+/// `backlightFloor` they do stack deliberately: the backlight keeps going down and
+/// gamma joins in, which is the only way to reach the very dark end.
 func apply(_ display: Display) {
     let s = Store.shared[display.name]
     if Capabilities.shared.mode(for: display.name) == .hardware,
        let service = Capabilities.shared.service(for: display.name) {
-        Backlight.shared.set(percent: s.brightness, id: display.id, name: display.name, service: service)
-        applyGamma(display.id, brightness: 1.0, warmth: s.warmth)
+        Backlight.shared.set(percent: s.brightness, id: display.id, name: display.name,
+                             service: service,
+                             ceiling: Capabilities.shared.maxLuminance(for: display.name))
+        let gamma = s.brightness < backlightFloor
+            ? max(deepDimFloor, s.brightness / backlightFloor) : 1.0
+        applyGamma(display.id, brightness: gamma, warmth: s.warmth)
     } else {
         applyGamma(display.id, brightness: s.brightness, warmth: s.warmth)
     }
@@ -246,26 +261,83 @@ func setDisplay(_ id: CGDirectDisplayID, enabled: Bool) -> Bool {
 
 // MARK: - Keep awake
 
-/// Holds a power-management assertion so the Mac and its displays don't sleep.
+/// Holds a power-management assertion so the Mac and its displays don't sleep,
+/// either indefinitely or for a set number of hours.
+///
 /// Deliberately session-only — it never survives a relaunch, so the machine can't
 /// be left sleepless by a setting someone forgot about.
 final class KeepAwake {
     static let shared = KeepAwake()
-    private var assertion = IOPMAssertionID(0)
-    private(set) var active = false
+    static let maxHours: Double = 24
 
-    func toggle() {
-        if active {
-            IOPMAssertionRelease(assertion)
-            active = false
-        } else {
-            active = IOPMAssertionCreateWithName(
+    private var assertion = IOPMAssertionID(0)
+    private var timer: Timer?
+    private(set) var active = false
+    /// When the session ends. Nil while active means no time limit.
+    private(set) var expiry: Date?
+
+    /// "Off", "No limit", or the time left — what the menu shows.
+    var stateDescription: String {
+        guard active else { return "Off" }
+        guard let expiry else { return "No limit" }
+        let seconds = max(0, Int(expiry.timeIntervalSinceNow.rounded(.up)))
+        let hours = seconds / 3600, minutes = (seconds % 3600) / 60
+        if hours == 0 { return "\(max(1, minutes))m left" }
+        return minutes == 0 ? "\(hours)h left" : "\(hours)h \(minutes)m left"
+    }
+
+    func start(hours: Double?) {
+        if !active {
+            guard IOPMAssertionCreateWithName(
                 "PreventUserIdleDisplaySleep" as CFString,
                 IOPMAssertionLevel(kIOPMAssertionLevelOn),
-                "DisplayWave — Keep Mac Awake" as CFString,
-                &assertion) == kIOReturnSuccess
+                // Plain ASCII: this string is what `pmset -g assertions` prints.
+                "DisplayWave: Keep Mac Awake" as CFString,
+                &assertion) == kIOReturnSuccess else { return }
+            active = true
+        }
+        expiry = hours.map { Date(timeIntervalSinceNow: $0 * 3600) }
+        rearm()
+    }
+
+    func stop() {
+        guard active else { return }
+        IOPMAssertionRelease(assertion)
+        active = false
+        expiry = nil
+        rearm()
+    }
+
+    /// Adds or removes time. Adding while off starts a timed session; removing the
+    /// last of the time ends it. A session with no limit ignores adjustments —
+    /// there is nothing to count down.
+    func adjust(hours: Double) {
+        guard active else {
+            if hours > 0 { start(hours: hours) }
+            return
+        }
+        guard let expiry else { return }
+        let end = expiry.addingTimeInterval(hours * 3600)
+        if end <= Date() {
+            stop()
+        } else {
+            self.expiry = min(end, Date(timeIntervalSinceNow: Self.maxHours * 3600))
+            rearm()
         }
     }
+
+    /// Keeps a single timer aligned with the current expiry.
+    private func rearm() {
+        timer?.invalidate()
+        timer = nil
+        guard active, let expiry else { return }
+        let t = Timer(fireAt: expiry, interval: 0, target: self,
+                      selector: #selector(expired), userInfo: nil, repeats: false)
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    @objc private func expired() { stop() }
 }
 
 // MARK: - UI helpers
@@ -357,7 +429,7 @@ final class DisplayCard: FlippedView {
         y = addControlGroup(title: hardware ? "Brightness" : "Brightness · software",
                             icon: hardware ? "sun.max.fill" : "sun.max", tint: .systemYellow,
                             tooltip: hardware
-                                ? "Adjusts this monitor's backlight"
+                                ? "Adjusts this monitor's backlight. Past the backlight's lowest useful setting, the image is dimmed as well so it can go darker still."
                                 : "This monitor doesn't answer DDC, so the image is dimmed on the GPU instead of lowering the backlight",
                             slider: brightnessSlider, minValue: hardware ? 0.05 : 0.15, value: s.brightness,
                             readout: brightnessReadout, action: #selector(brightnessChanged),
@@ -607,6 +679,76 @@ final class SceneRow: FlippedView {
     }
 }
 
+// MARK: - Keep awake row
+
+// Keep-awake with a duration: Off and Always at the ends, hour adjustments between.
+// The readout counts down while the menu is open.
+final class KeepAwakeRow: FlippedView {
+    private static let steps: [Double] = [-5, -1, 1, 5]
+    private let control: NSSegmentedControl
+    private let readout: NSTextField
+    private var ticker: Timer?
+
+    override init(frame: NSRect) {
+        control = NSSegmentedControl(
+            labels: ["Off"] + Self.steps.map { $0 < 0 ? "−\(Int(-$0))h" : "+\(Int($0))h" } + ["Always"],
+            trackingMode: .momentary, target: nil, action: nil)
+        readout = label("", size: 11, color: .secondaryLabelColor, align: .right)
+        super.init(frame: NSRect(x: 0, y: 0, width: DisplayCard.width, height: 54))
+        let pad: CGFloat = 16
+        let contentWidth = DisplayCard.width - pad * 2
+
+        let icon = NSImageView(frame: NSRect(x: pad, y: 7, width: 13, height: 13))
+        icon.image = NSImage(systemSymbolName: "cup.and.saucer.fill", accessibilityDescription: nil)
+        icon.contentTintColor = .secondaryLabelColor
+        addSubview(icon)
+
+        let title = label("Keep Mac Awake", size: 11, weight: .medium, color: .secondaryLabelColor)
+        title.frame = NSRect(x: pad + 18, y: 6, width: contentWidth - 100, height: 14)
+        title.toolTip = "Stops the Mac and its displays from sleeping. Always runs until turned off or DisplayWave quits."
+        addSubview(title)
+
+        readout.frame = NSRect(x: pad + contentWidth - 82, y: 6, width: 82, height: 14)
+        addSubview(readout)
+
+        control.segmentDistribution = .fillEqually
+        control.controlSize = .small
+        control.font = .systemFont(ofSize: 10)
+        control.target = self
+        control.action = #selector(pick)
+        control.frame = NSRect(x: pad, y: 25, width: contentWidth, height: 20)
+        addSubview(control)
+
+        refresh()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    // Tick only while the row is on screen, so an idle menu bar app stays idle.
+    override func viewDidMoveToWindow() {
+        ticker?.invalidate()
+        guard window != nil else { ticker = nil; return }
+        let t = Timer(timeInterval: 20, repeats: true) { [weak self] _ in self?.refresh() }
+        RunLoop.main.add(t, forMode: .common)
+        ticker = t
+    }
+
+    private func refresh() {
+        let awake = KeepAwake.shared
+        readout.stringValue = awake.stateDescription
+        readout.textColor = awake.active ? .labelColor : .secondaryLabelColor
+    }
+
+    @objc private func pick() {
+        switch control.selectedSegment {
+        case 0: KeepAwake.shared.stop()
+        case control.segmentCount - 1: KeepAwake.shared.start(hours: nil)
+        case let i: KeepAwake.shared.adjust(hours: Self.steps[i - 1])
+        }
+        refresh()
+    }
+}
+
 // MARK: - Scene editor
 
 // A small window for tuning what each scene means. Changes save as they're made;
@@ -813,13 +955,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(.separator())
         }
 
-        let awake = NSMenuItem(title: "Keep Mac Awake", action: #selector(toggleKeepAwake), keyEquivalent: "")
-        awake.target = self
-        awake.state = KeepAwake.shared.active ? .on : .off
-        awake.image = NSImage(systemSymbolName: KeepAwake.shared.active ? "cup.and.saucer.fill" : "cup.and.saucer",
-                              accessibilityDescription: nil)
-        awake.toolTip = "Stops the Mac and its displays from sleeping until this is turned off or DisplayWave quits"
+        let awake = NSMenuItem()
+        awake.view = KeepAwakeRow(frame: .zero)
         menu.addItem(awake)
+        menu.addItem(.separator())
 
         let login = NSMenuItem(title: "Start at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
         login.target = self
@@ -877,10 +1016,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         applyAll()
     }
 
-    @objc private func toggleKeepAwake() {
-        KeepAwake.shared.toggle()
-    }
-
     @objc private func toggleLoginItem() {
         do {
             if SMAppService.mainApp.status == .enabled {
@@ -935,6 +1070,7 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
         let rows: [NSView] = [SceneRow(frame: .zero)]
             + onlineDisplays().filter(\.active)
             .map { DisplayCard(display: $0, menu: nil, canPowerOff: true) }
+            + [KeepAwakeRow(frame: .zero)]
         let height = rows.reduce(0) { $0 + $1.frame.height + 1 }
 
         let canvas = FlippedView(frame: NSRect(x: 0, y: 0, width: DisplayCard.width, height: height))
