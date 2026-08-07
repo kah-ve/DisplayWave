@@ -253,13 +253,65 @@ final class Store {
 // Brightness scales the whole output; warmth pulls down green and blue so what's
 // left skews red. The brightness floor keeps a screen from going fully black, which
 // would leave no way to see the menu that brings it back.
-func applyGamma(_ id: CGDirectDisplayID, brightness: Double, warmth: Double) {
-    let b = Float(max(0.15, min(1.0, brightness)))
+func applyGamma(_ id: CGDirectDisplayID, brightness: Double, warmth: Double, floor: Double = 0.15) {
+    let b = Float(max(floor, min(1.0, brightness)))
     let w = Float(max(0.0, min(1.0, warmth)))
     CGSetDisplayTransferByFormula(id,
                                   0, b, 1.0,
                                   0, b * (1.0 - 0.18 * w), 1.0,
                                   0, b * (1.0 - 0.45 * w), 1.0)
+}
+
+/// Takes every display far below the normal brightness floors — for leaving screens
+/// on overnight without lighting up the room. The floors exist so a screen can't go
+/// dark enough to hide the menu; this deliberately steps past them, so it is
+/// session-only and quitting or restarting always brings the screens back.
+final class Blackout {
+    static let shared = Blackout()
+    /// A faint glow: dark enough not to disturb a dark room, light enough that the
+    /// menu can still be found to switch it off.
+    static let level = 0.05
+
+    /// Keys pressed within this long of switching blackout on don't count as the
+    /// escape — otherwise driving the menu by keyboard would undo it instantly.
+    private static let grace: TimeInterval = 1.5
+
+    private(set) var active = false
+    private var startedAt = Date()
+    private var watchdog: Timer?
+
+    func toggle() {
+        active.toggle()
+        if active { watchForKeypress() } else { watchdog?.invalidate(); watchdog = nil }
+        applyAll()
+    }
+
+    /// Adjusting a display, applying a preset, or pressing any key means "I want to
+    /// see this now". Stored settings are never touched by blackout, so leaving it
+    /// puts every display back exactly as it was.
+    func deactivate() {
+        guard active else { return }
+        active = false
+        watchdog?.invalidate()
+        watchdog = nil
+        applyAll()
+    }
+
+    /// Watches for a keypress without an event tap — asking the system how long the
+    /// keyboard has been idle needs no permissions, where monitoring keys does.
+    /// Mouse movement is ignored on purpose: a nudged desk shouldn't light the room.
+    private func watchForKeypress() {
+        startedAt = Date()
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self, self.active else { return }
+            let elapsed = Date().timeIntervalSince(self.startedAt)
+            let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState,
+                                                               eventType: .keyDown)
+            if idle < elapsed - Self.grace { self.deactivate() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        watchdog = timer
+    }
 }
 
 /// Where gamma starts helping the backlight out. A monitor's lowest backlight
@@ -278,6 +330,21 @@ let deepDimFloor = 0.35
 /// gamma joins in, which is the only way to reach the very dark end.
 func apply(_ display: Display) {
     let s = Store.shared[display.name]
+    let hardwareService = Capabilities.shared.mode(for: display.name) == .hardware
+        ? Capabilities.shared.service(for: display.name) : nil
+
+    if Blackout.shared.active {
+        // Backlight as low as it goes and gamma past its usual floor. Full warmth
+        // too — blue light is the part that keeps you awake.
+        if let service = hardwareService {
+            Backlight.shared.set(percent: Blackout.level, id: display.id, name: display.name,
+                                 service: service,
+                                 ceiling: Capabilities.shared.maxLuminance(for: display.name))
+        }
+        applyGamma(display.id, brightness: Blackout.level, warmth: 1.0, floor: Blackout.level)
+        return
+    }
+
     if Capabilities.shared.mode(for: display.name) == .hardware,
        let service = Capabilities.shared.service(for: display.name) {
         Backlight.shared.set(percent: s.brightness, id: display.id, name: display.name,
@@ -298,6 +365,7 @@ func applyAll() {
 /// Puts every active display back to how the preset describes it. Displays the
 /// preset says nothing about are left alone.
 func applyPreset(_ preset: Preset) {
+    Blackout.shared.deactivate()
     for display in onlineDisplays() where display.active {
         guard let settings = preset.settings(for: display.name) else { continue }
         Store.shared[display.name] = settings
@@ -635,6 +703,8 @@ final class DisplayCard: FlippedView {
 
     private func commit(_ s: Settings) {
         Store.shared[display.name] = s
+        // Touching a slider means the screens are wanted back.
+        Blackout.shared.deactivate()
         apply(display)
     }
 
@@ -1064,6 +1134,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let awake = NSMenuItem()
         awake.view = KeepAwakeRow(frame: .zero)
         menu.addItem(awake)
+
+        let blackout = NSMenuItem(title: "Blackout", action: #selector(toggleBlackout), keyEquivalent: "")
+        blackout.target = self
+        blackout.state = Blackout.shared.active ? .on : .off
+        blackout.image = NSImage(systemSymbolName: "moon.zzz.fill", accessibilityDescription: nil)
+        blackout.toolTip = "Dims every display to a faint glow — darker than the sliders allow — for leaving screens on overnight. Press any key to bring them back."
+        menu.addItem(blackout)
         menu.addItem(.separator())
 
         let login = NSMenuItem(title: "Start at Login", action: #selector(toggleLoginItem), keyEquivalent: "")
@@ -1118,6 +1195,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func resetAll() {
         Store.shared.reset()
+        // Also the way out of blackout for anyone who can't read the dimmed menu.
+        Blackout.shared.deactivate()
         CGDisplayRestoreColorSyncSettings()
         applyAll()
     }
@@ -1132,6 +1211,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch {
             NSSound.beep()
         }
+    }
+
+    @objc private func toggleBlackout() {
+        Blackout.shared.toggle()
     }
 
     @objc private func arrangeDisplays() {
