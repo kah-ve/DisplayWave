@@ -43,43 +43,103 @@ struct Display {
 let brightnessPresets: [Double] = [0.35, 0.50, 0.75, 1.0]
 let warmthPresets: [Double] = [0.0, 0.25, 0.50, 0.75, 1.0]
 
-// One-click combinations applied to every display at once.
-struct Scene {
-    let name: String
-    let brightness: Double
-    let warmth: Double
+/// A named snapshot of how the desk should look: what each monitor's brightness and
+/// warmth should be. One click puts every display back to it.
+struct Preset {
+    /// Settings under this key apply to any display the preset doesn't name, so a
+    /// preset still does something sensible on a monitor plugged in later.
+    static let anyDisplay = "*"
+
+    var name: String
+    var settings: [String: Settings]
+
+    func settings(for displayName: String) -> Settings? {
+        settings[displayName] ?? settings[Preset.anyDisplay]
+    }
+
+    /// Captures what every active display is set to right now.
+    static func fromCurrent(name: String) -> Preset {
+        let displays = onlineDisplays().filter(\.active)
+        var settings = Dictionary(uniqueKeysWithValues: displays.map { ($0.name, Store.shared[$0.name]) })
+        // Give unknown displays the first monitor's look rather than nothing.
+        if let first = displays.first { settings[anyDisplay] = Store.shared[first.name] }
+        return Preset(name: name, settings: settings)
+    }
 }
 
-let defaultScenes = [
-    Scene(name: "Day", brightness: 1.0, warmth: 0.0),
-    Scene(name: "Evening", brightness: 0.70, warmth: 0.40),
-    Scene(name: "Night", brightness: 0.35, warmth: 0.80),
+let defaultPresets = [
+    Preset(name: "Day", settings: [Preset.anyDisplay: Settings(brightness: 1.0, warmth: 0.0)]),
+    Preset(name: "Evening", settings: [Preset.anyDisplay: Settings(brightness: 0.70, warmth: 0.40)]),
+    Preset(name: "Night", settings: [Preset.anyDisplay: Settings(brightness: 0.35, warmth: 0.80)]),
 ]
 
-/// Scene values are editable via "Edit Scenes…"; edits are stored as overrides on
-/// the defaults, so resetting is just removing the overrides.
-final class SceneStore {
-    static let shared = SceneStore()
-    private let key = "scenes"
-    private(set) var scenes: [Scene] = defaultScenes
+/// The user's presets, in menu order. Editable via "Edit Presets…".
+final class PresetStore {
+    static let shared = PresetStore()
+    private let key = "presets"
+    private(set) var presets: [Preset] = defaultPresets
 
     private init() {
-        if let raw = UserDefaults.standard.dictionary(forKey: key) as? [String: [Double]] {
-            scenes = defaultScenes.map { s in
-                guard let v = raw[s.name], v.count == 2 else { return s }
-                return Scene(name: s.name, brightness: v[0], warmth: v[1])
+        guard let raw = UserDefaults.standard.array(forKey: key) as? [[String: Any]] else { return }
+        let loaded = raw.compactMap { entry -> Preset? in
+            guard let name = entry["name"] as? String,
+                  let values = entry["settings"] as? [String: [Double]] else { return nil }
+            let settings = values.compactMapValues { v in
+                v.count == 2 ? Settings(brightness: v[0], warmth: v[1]) : nil
             }
+            return Preset(name: name, settings: settings)
         }
+        if !loaded.isEmpty { presets = loaded }
     }
 
-    func update(index: Int, brightness: Double, warmth: Double) {
-        scenes[index] = Scene(name: scenes[index].name, brightness: brightness, warmth: warmth)
-        let raw = Dictionary(uniqueKeysWithValues: scenes.map { ($0.name, [$0.brightness, $0.warmth]) })
-        UserDefaults.standard.set(raw, forKey: key)
+    private func save() {
+        UserDefaults.standard.set(presets.map { preset in
+            ["name": preset.name,
+             "settings": preset.settings.mapValues { [$0.brightness, $0.warmth] }]
+        }, forKey: key)
     }
 
-    func reset() {
-        scenes = defaultScenes
+    /// Names have to be distinct — they're how presets are told apart in the menu.
+    private func uniqueName(_ wanted: String, excluding index: Int? = nil) -> String {
+        let taken = presets.enumerated()
+            .filter { $0.offset != index }
+            .map { $0.element.name.lowercased() }
+        var name = wanted.trimmingCharacters(in: .whitespaces)
+        if name.isEmpty { name = "Preset" }
+        var candidate = name, n = 2
+        while taken.contains(candidate.lowercased()) {
+            candidate = "\(name) \(n)"
+            n += 1
+        }
+        return candidate
+    }
+
+    func addFromCurrent(name: String) {
+        presets.append(Preset.fromCurrent(name: uniqueName(name)))
+        save()
+    }
+
+    /// Replaces a preset's contents with the way the displays look right now.
+    func updateFromCurrent(index: Int) {
+        guard presets.indices.contains(index) else { return }
+        presets[index] = Preset.fromCurrent(name: presets[index].name)
+        save()
+    }
+
+    func rename(index: Int, to name: String) {
+        guard presets.indices.contains(index) else { return }
+        presets[index].name = uniqueName(name, excluding: index)
+        save()
+    }
+
+    func remove(index: Int) {
+        guard presets.indices.contains(index) else { return }
+        presets.remove(at: index)
+        save()
+    }
+
+    func resetToDefaults() {
+        presets = defaultPresets
         UserDefaults.standard.removeObject(forKey: key)
     }
 }
@@ -233,6 +293,17 @@ func apply(_ display: Display) {
 
 func applyAll() {
     for d in onlineDisplays() where d.active { apply(d) }
+}
+
+/// Puts every active display back to how the preset describes it. Displays the
+/// preset says nothing about are left alone.
+func applyPreset(_ preset: Preset) {
+    for display in onlineDisplays() where display.active {
+        guard let settings = preset.settings(for: display.name) else { continue }
+        Store.shared[display.name] = settings
+        apply(display)
+    }
+    AppDelegate.shared?.refreshVisibleCards()
 }
 
 /// Refreshes the DDC service handles first, then reapplies — for after any display
@@ -549,7 +620,7 @@ final class DisplayCard: FlippedView {
     }
 
     /// Pulls slider positions, readouts and preset highlighting back from the store,
-    /// so a scene applied from the bottom of the menu is reflected in the cards above.
+    /// so a preset applied from the top of the menu is reflected in the cards below.
     func refreshFromStore() {
         let s = Store.shared[display.name]
         brightnessSlider.doubleValue = s.brightness
@@ -640,42 +711,46 @@ final class DisplayCard: FlippedView {
     }
 }
 
-// MARK: - Scenes row
+// MARK: - Presets row
 
-// One click sets both brightness and warmth on every display.
-final class SceneRow: FlippedView {
-    private let control: NSSegmentedControl
+// One click restores every display to a saved look. Presets wrap onto extra rows
+// rather than squeezing, so the labels stay readable however many there are.
+final class PresetRow: FlippedView {
+    private static let perRow = 3
+    private var controls: [NSSegmentedControl] = []
 
     override init(frame: NSRect) {
-        control = NSSegmentedControl(labels: SceneStore.shared.scenes.map(\.name), trackingMode: .momentary,
-                                     target: nil, action: nil)
-        super.init(frame: NSRect(x: 0, y: 0, width: DisplayCard.width, height: 54))
+        let presets = PresetStore.shared.presets
+        let rows = stride(from: 0, to: max(presets.count, 1), by: Self.perRow).map {
+            Array(presets[$0 ..< min($0 + Self.perRow, presets.count)])
+        }
+        super.init(frame: NSRect(x: 0, y: 0, width: DisplayCard.width,
+                                 height: 25 + CGFloat(rows.count) * 26 + 6))
         let pad: CGFloat = 16
         let contentWidth = DisplayCard.width - pad * 2
 
-        let title = label("All Displays", size: 11, weight: .medium, color: .secondaryLabelColor)
+        let title = label("Presets", size: 11, weight: .medium, color: .secondaryLabelColor)
         title.frame = NSRect(x: pad, y: 6, width: contentWidth, height: 14)
         addSubview(title)
 
-        control.segmentDistribution = .fillEqually
-        control.target = self
-        control.action = #selector(pick)
-        control.frame = NSRect(x: pad, y: 25, width: contentWidth, height: 22)
-        addSubview(control)
+        for (row, chunk) in rows.enumerated() where !chunk.isEmpty {
+            let control = NSSegmentedControl(labels: chunk.map(\.name), trackingMode: .momentary,
+                                             target: self, action: #selector(pick(_:)))
+            control.segmentDistribution = .fillEqually
+            // Tag carries the index of this row's first preset.
+            control.tag = row * Self.perRow
+            control.frame = NSRect(x: pad, y: 25 + CGFloat(row) * 26, width: contentWidth, height: 22)
+            addSubview(control)
+            controls.append(control)
+        }
     }
 
     required init?(coder: NSCoder) { nil }
 
-    @objc private func pick() {
-        let scene = SceneStore.shared.scenes[control.selectedSegment]
-        for d in onlineDisplays() where d.active {
-            var s = Store.shared[d.name]
-            s.brightness = scene.brightness
-            s.warmth = scene.warmth
-            Store.shared[d.name] = s
-            apply(d)
-        }
-        AppDelegate.shared?.refreshVisibleCards()
+    @objc private func pick(_ sender: NSSegmentedControl) {
+        let index = sender.tag + sender.selectedSegment
+        guard PresetStore.shared.presets.indices.contains(index) else { return }
+        applyPreset(PresetStore.shared.presets[index])
     }
 }
 
@@ -749,92 +824,123 @@ final class KeepAwakeRow: FlippedView {
     }
 }
 
-// MARK: - Scene editor
+// MARK: - Preset editor
 
-// A small window for tuning what each scene means. Changes save as they're made;
-// they take effect the next time a scene is clicked.
-final class SceneEditorView: FlippedView {
-    private var brightnessSliders: [NSSlider] = []
-    private var warmthSliders: [NSSlider] = []
-    private var brightnessReadouts: [NSTextField] = []
-    private var warmthReadouts: [NSTextField] = []
+// One row per preset: type to rename, Save to overwrite it with how the displays
+// look right now, ✕ to delete. Everything saves immediately.
+final class PresetEditorView: FlippedView, NSTextFieldDelegate {
+    static let width: CGFloat = 420
+    private static let rowHeight: CGFloat = 32
+    private weak var hostWindow: NSWindow?
 
-    init() {
-        let width: CGFloat = 380
-        let sceneCount = SceneStore.shared.scenes.count
-        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 16 + CGFloat(sceneCount) * 88 + 40))
-        let pad: CGFloat = 16
-
-        for (i, scene) in SceneStore.shared.scenes.enumerated() {
-            let y0 = 16 + CGFloat(i) * 88
-
-            let name = label(scene.name, size: 13, weight: .semibold)
-            name.frame = NSRect(x: pad, y: y0, width: 200, height: 17)
-            addSubview(name)
-
-            addRow(title: "Brightness", value: scene.brightness, minValue: 0.15,
-                   y: y0 + 22, pad: pad, width: width, tag: i,
-                   sliders: &brightnessSliders, readouts: &brightnessReadouts)
-            addRow(title: "Warmth", value: scene.warmth, minValue: 0.0,
-                   y: y0 + 46, pad: pad, width: width, tag: i,
-                   sliders: &warmthSliders, readouts: &warmthReadouts)
-        }
-
-        let hint = label("Scenes apply to every display at once", size: 10, color: .tertiaryLabelColor)
-        hint.frame = NSRect(x: pad, y: frame.height - 32, width: 210, height: 14)
-        addSubview(hint)
-
-        let reset = NSButton(title: "Reset Scenes", target: self, action: #selector(resetScenes))
-        reset.bezelStyle = .rounded
-        reset.controlSize = .small
-        reset.frame = NSRect(x: width - pad - 110, y: frame.height - 38, width: 110, height: 24)
-        addSubview(reset)
+    init(window: NSWindow?) {
+        self.hostWindow = window
+        super.init(frame: NSRect(x: 0, y: 0, width: Self.width, height: 100))
+        reload()
     }
 
     required init?(coder: NSCoder) { nil }
 
-    private func addRow(title: String, value: Double, minValue: Double, y: CGFloat,
-                        pad: CGFloat, width: CGFloat, tag: Int,
-                        sliders: inout [NSSlider], readouts: inout [NSTextField]) {
-        let caption = label(title, size: 11, color: .secondaryLabelColor)
-        caption.frame = NSRect(x: pad, y: y + 2, width: 70, height: 14)
-        addSubview(caption)
+    /// Rebuilds from scratch — presets can be added and removed, so the row count
+    /// isn't fixed.
+    private func reload() {
+        subviews.forEach { $0.removeFromSuperview() }
+        let presets = PresetStore.shared.presets
+        let pad: CGFloat = 16
+        let height = 44 + CGFloat(presets.count) * Self.rowHeight + 48
+        setFrameSize(NSSize(width: Self.width, height: height))
 
-        let slider = NSSlider()
-        slider.minValue = minValue
-        slider.maxValue = 1.0
-        slider.doubleValue = value
-        slider.isContinuous = true
-        slider.tag = tag
-        slider.target = self
-        slider.action = #selector(sliderChanged(_:))
-        slider.frame = NSRect(x: pad + 76, y: y, width: width - pad * 2 - 76 - 46, height: 19)
-        addSubview(slider)
-        sliders.append(slider)
+        let heading = label("Save replaces a preset with how your displays look right now.",
+                            size: 11, color: .secondaryLabelColor)
+        heading.frame = NSRect(x: pad, y: 14, width: Self.width - pad * 2, height: 16)
+        addSubview(heading)
 
-        let readout = label(percentString(value), size: 11, color: .secondaryLabelColor, align: .right)
-        readout.frame = NSRect(x: width - pad - 42, y: y + 2, width: 42, height: 14)
-        addSubview(readout)
-        readouts.append(readout)
-    }
+        for (i, preset) in presets.enumerated() {
+            let y = 44 + CGFloat(i) * Self.rowHeight
 
-    @objc private func sliderChanged(_ sender: NSSlider) {
-        let i = sender.tag
-        SceneStore.shared.update(index: i,
-                                 brightness: brightnessSliders[i].doubleValue,
-                                 warmth: warmthSliders[i].doubleValue)
-        brightnessReadouts[i].stringValue = percentString(brightnessSliders[i].doubleValue)
-        warmthReadouts[i].stringValue = percentString(warmthSliders[i].doubleValue)
-    }
+            let name = NSTextField(string: preset.name)
+            name.font = .systemFont(ofSize: 12)
+            name.tag = i
+            name.delegate = self
+            name.target = self
+            name.action = #selector(renamed(_:))
+            name.frame = NSRect(x: pad, y: y, width: 200, height: 22)
+            addSubview(name)
 
-    @objc private func resetScenes() {
-        SceneStore.shared.reset()
-        for (i, scene) in SceneStore.shared.scenes.enumerated() {
-            brightnessSliders[i].doubleValue = scene.brightness
-            warmthSliders[i].doubleValue = scene.warmth
-            brightnessReadouts[i].stringValue = percentString(scene.brightness)
-            warmthReadouts[i].stringValue = percentString(scene.warmth)
+            let detail = label(describe(preset), size: 10, color: .tertiaryLabelColor)
+            detail.frame = NSRect(x: pad + 208, y: y + 4, width: 84, height: 14)
+            addSubview(detail)
+
+            let save = NSButton(title: "Save", target: self, action: #selector(updateFromCurrent(_:)))
+            save.bezelStyle = .rounded
+            save.controlSize = .small
+            save.tag = i
+            save.toolTip = "Replace \"\(preset.name)\" with how the displays look right now"
+            save.frame = NSRect(x: Self.width - pad - 92, y: y, width: 56, height: 22)
+            addSubview(save)
+
+            let delete = NSButton(title: "", target: self, action: #selector(remove(_:)))
+            delete.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Delete")
+            delete.isBordered = false
+            delete.contentTintColor = .tertiaryLabelColor
+            delete.tag = i
+            delete.toolTip = "Delete \"\(preset.name)\""
+            delete.isEnabled = presets.count > 1
+            delete.frame = NSRect(x: Self.width - pad - 24, y: y + 2, width: 20, height: 18)
+            addSubview(delete)
         }
+
+        let add = NSButton(title: "New from Current Settings", target: self, action: #selector(addNew))
+        add.bezelStyle = .rounded
+        add.controlSize = .small
+        add.frame = NSRect(x: pad, y: height - 38, width: 200, height: 24)
+        addSubview(add)
+
+        let reset = NSButton(title: "Restore Defaults", target: self, action: #selector(restoreDefaults))
+        reset.bezelStyle = .rounded
+        reset.controlSize = .small
+        reset.frame = NSRect(x: Self.width - pad - 130, y: height - 38, width: 130, height: 24)
+        addSubview(reset)
+
+        hostWindow?.setContentSize(NSSize(width: Self.width, height: height))
+    }
+
+    /// "All displays" for a preset that applies everywhere, otherwise how many
+    /// monitors it remembers.
+    private func describe(_ preset: Preset) -> String {
+        let named = preset.settings.keys.filter { $0 != Preset.anyDisplay }.count
+        if named == 0 { return "All displays" }
+        return named == 1 ? "1 display" : "\(named) displays"
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField else { return }
+        renamed(field)
+    }
+
+    @objc private func renamed(_ sender: NSTextField) {
+        PresetStore.shared.rename(index: sender.tag, to: sender.stringValue)
+        reload()
+    }
+
+    @objc private func updateFromCurrent(_ sender: NSButton) {
+        PresetStore.shared.updateFromCurrent(index: sender.tag)
+        reload()
+    }
+
+    @objc private func remove(_ sender: NSButton) {
+        PresetStore.shared.remove(index: sender.tag)
+        reload()
+    }
+
+    @objc private func addNew() {
+        PresetStore.shared.addFromCurrent(name: "New Preset")
+        reload()
+    }
+
+    @objc private func restoreDefaults() {
+        PresetStore.shared.resetToDefaults()
+        reload()
     }
 }
 
@@ -843,7 +949,7 @@ final class SceneEditorView: FlippedView {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     static var shared: AppDelegate?
     var statusItem: NSStatusItem!
-    // Cards in the currently open menu, so a scene can update them in place.
+    // Cards in the currently open menu, so a preset can update them in place.
     private var visibleCards: [DisplayCard] = []
 
     func refreshVisibleCards() {
@@ -918,11 +1024,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let online = onlineDisplays()
         let activeCount = online.filter(\.active).count
 
-        // Scenes first: the one-click action people reach for most often.
+        // Presets first: the one-click action people reach for most often.
         if activeCount > 0 {
-            let scenesItem = NSMenuItem()
-            scenesItem.view = SceneRow(frame: .zero)
-            menu.addItem(scenesItem)
+            let presetsItem = NSMenuItem()
+            presetsItem.view = PresetRow(frame: .zero)
+            menu.addItem(presetsItem)
             menu.addItem(.separator())
         }
 
@@ -972,10 +1078,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         arrange.toolTip = "Opens macOS display settings, where displays can be arranged"
         menu.addItem(arrange)
 
-        let editScenes = NSMenuItem(title: "Edit Scenes…", action: #selector(openSceneEditor), keyEquivalent: "")
-        editScenes.target = self
-        editScenes.toolTip = "Change what Day, Evening and Night set brightness and warmth to"
-        menu.addItem(editScenes)
+        let editPresets = NSMenuItem(title: "Edit Presets…", action: #selector(openPresetEditor), keyEquivalent: "")
+        editPresets.target = self
+        editPresets.toolTip = "Save the current look as a preset, or rename and delete presets"
+        menu.addItem(editPresets)
         menu.addItem(.separator())
 
         let resync = NSMenuItem(title: "Resync Monitors", action: #selector(recheckHardware), keyEquivalent: "")
@@ -1032,21 +1138,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension")!)
     }
 
-    private var sceneEditor: NSWindow?
+    private var presetEditor: NSWindow?
 
-    @objc private func openSceneEditor() {
-        if sceneEditor == nil {
-            let view = SceneEditorView()
-            let window = NSWindow(contentRect: NSRect(origin: .zero, size: view.frame.size),
-                                  styleMask: [.titled, .closable], backing: .buffered, defer: false)
-            window.title = "Edit Scenes"
-            window.contentView = view
-            window.isReleasedWhenClosed = false
-            window.center()
-            sceneEditor = window
-        }
+    @objc private func openPresetEditor() {
+        // Rebuilt each time so it reflects the presets as they are now.
+        presetEditor?.close()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: PresetEditorView.width, height: 100),
+                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        window.title = "Presets"
+        window.contentView = PresetEditorView(window: window)
+        window.isReleasedWhenClosed = false
+        window.center()
+        presetEditor = window
         NSApp.activate(ignoringOtherApps: true)
-        sceneEditor?.makeKeyAndOrderFront(nil)
+        window.makeKeyAndOrderFront(nil)
     }
 
     @objc private func recheckHardware() {
@@ -1058,16 +1163,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 }
 
 // `DisplayWave --preview <file.png>` renders the menu's custom views to an image so
-// layout can be checked without opening the menu by hand. The views have to be in a
-// real window in a running app before AppKit will draw them.
+// layout can be checked without opening the menu by hand, and the preset editor
+// alongside it as `<file>-presets.png`. The views have to be in a real window in a
+// running app before AppKit will draw them.
 final class PreviewDelegate: NSObject, NSApplicationDelegate {
     private let path: String
-    private var window: NSWindow?
+    private var windows: [NSWindow] = []
 
     init(path: String) { self.path = path }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let rows: [NSView] = [SceneRow(frame: .zero)]
+        let rows: [NSView] = [PresetRow(frame: .zero)]
             + onlineDisplays().filter(\.active)
             .map { DisplayCard(display: $0, menu: nil, canPowerOff: true) }
             + [KeepAwakeRow(frame: .zero)]
@@ -1081,38 +1187,47 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
             y += row.frame.height + 1
         }
 
-        canvas.wantsLayer = true
-        canvas.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        let menuWindow = show(canvas)
+        let editor = PresetEditorView(window: nil)
+        let editorWindow = show(editor)
 
-        let window = NSWindow(contentRect: canvas.bounds, styleMask: [.borderless],
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            self.capture(menuWindow, to: self.path)
+            self.capture(editorWindow, to: (self.path as NSString).deletingPathExtension + "-presets.png")
+            NSApp.terminate(nil)
+        }
+    }
+
+    private func show(_ view: NSView) -> NSWindow {
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        let window = NSWindow(contentRect: view.bounds, styleMask: [.borderless],
                               backing: .buffered, defer: false)
-        window.contentView = canvas
+        window.contentView = view
         window.backgroundColor = .windowBackgroundColor
         window.setFrameOrigin(NSPoint(x: 60, y: 60))
         window.makeKeyAndOrderFront(nil)
-        self.window = window
+        windows.append(window)
         NSApp.activate(ignoringOtherApps: true)
+        return window
+    }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-            if let view = window.contentView, let layer = view.layer {
-                let scale: CGFloat = 2
-                let w = Int(view.bounds.width * scale), h = Int(view.bounds.height * scale)
-                if let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
-                                              bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
-                                              isPlanar: false, colorSpaceName: .deviceRGB,
-                                              bytesPerRow: 0, bitsPerPixel: 0),
-                   let ctx = NSGraphicsContext(bitmapImageRep: rep) {
-                    // The canvas is flipped, so undo that when rendering to the bitmap.
-                    ctx.cgContext.translateBy(x: 0, y: CGFloat(h))
-                    ctx.cgContext.scaleBy(x: scale, y: -scale)
-                    // Layer-backed controls are only captured by rendering the layer tree.
-                    layer.render(in: ctx.cgContext)
-                    if let data = rep.representation(using: .png, properties: [:]) {
-                        try? data.write(to: URL(fileURLWithPath: self.path))
-                    }
-                }
-            }
-            NSApp.terminate(nil)
+    private func capture(_ window: NSWindow, to path: String) {
+        guard let view = window.contentView, let layer = view.layer else { return }
+        let scale: CGFloat = 2
+        let w = Int(view.bounds.width * scale), h = Int(view.bounds.height * scale)
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
+                                         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                         isPlanar: false, colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0),
+              let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return }
+        // The canvas is flipped, so undo that when rendering to the bitmap.
+        ctx.cgContext.translateBy(x: 0, y: CGFloat(h))
+        ctx.cgContext.scaleBy(x: scale, y: -scale)
+        // Layer-backed controls are only captured by rendering the layer tree.
+        layer.render(in: ctx.cgContext)
+        if let data = rep.representation(using: .png, properties: [:]) {
+            try? data.write(to: URL(fileURLWithPath: path))
         }
     }
 }
