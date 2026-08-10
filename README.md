@@ -10,6 +10,8 @@ power, brightness, warmth, resolution and refresh rate, all from one clean menu.
 It exists because the other options are either paywalled and too complicated with features
 or they don't handle it all in one app. DisplayWave is free and open source. Enjoy!
 
+https://news.ycombinator.com/item?id=49239013
+
 <img src="assets/menu.png"  width="280" alt="The DisplayWave menu: presets at the top, a card per monitor with brightness and warmth controls, turned-off displays, and utility items">
 
 ## Features
