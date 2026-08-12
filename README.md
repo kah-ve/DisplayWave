@@ -5,14 +5,78 @@
 # DisplayWave
 
 A minimal, free, open-source menu bar app for controlling external monitors on macOS —
-power, brightness, warmth, resolution and refresh rate, all from one clean menu.
+power, brightness, color temperature, resolution and refresh rate, all from one
+clean menu.
 
 It exists because the other options are either paywalled and too complicated with features
 or they don't handle it all in one app. DisplayWave is free and open source. Enjoy!
 
 https://news.ycombinator.com/item?id=49239013
 
-<img src="assets/menu.png"  width="280" alt="The DisplayWave menu: presets at the top, a card per monitor with brightness and warmth controls, turned-off displays, and utility items">
+<img src="assets/menu.png"  width="280" alt="The DisplayWave menu: presets at the top, a card per monitor with brightness and color temperature controls, turned-off displays, and utility items">
+
+## Install
+
+Requires macOS 13 or later. Hardware backlight control uses the Apple Silicon
+display driver; everything else also works on Intel, where brightness falls back to
+GPU dimming.
+
+### Option 1 — hand it to Claude
+
+The easiest route, and it sidesteps the Gatekeeper warning entirely. Paste this into
+[Claude Code](https://claude.com/claude-code) and it does the whole thing:
+
+> Clone https://github.com/kah-ve/DisplayWave and set it up on my Mac: build it with
+> ./build.sh, move DisplayWave.app into /Applications, and launch it. Install the
+> Xcode command line tools first if they're missing. Remind me to click "Start at
+> Login" in its menu so it starts automatically. Then tell me which of my monitors
+> support hardware backlight control and which will use software dimming, and what
+> the difference means.
+
+An app you build on your own machine is never marked as quarantined, so there is
+nothing to unblock — no `xattr`, no Gatekeeper dialog.
+
+### Option 2 — download the release
+
+1. Download the zip from [Releases](https://github.com/kah-ve/DisplayWave/releases)
+   and double-click it to unzip.
+2. Drag `DisplayWave.app` into your **Applications** folder.
+3. **Remove the quarantine flag.** This step is required. Open Terminal and run:
+
+   ```bash
+   xattr -cr /Applications/DisplayWave.app
+   ```
+
+4. Open the app. A wave icon appears in the menu bar — there's no Dock icon and no
+   window.
+
+Step 3 isn't optional and it isn't a nag you can click through. macOS quarantines
+everything downloaded from the internet, and only releases apps notarized by Apple
+— which needs a paid Apple Developer account this project doesn't have. Until the
+flag is cleared the app refuses to open, usually with *"Apple could not verify
+DisplayWave is free of malware"*. Run the command any time, before or after you
+first try to open it; it fixes both cases.
+
+**If you'd rather not use Terminal:** try to open the app once and let it be
+blocked, then go to **System Settings → Privacy & Security**, scroll to
+**Security**, and click **Open Anyway** next to the message about DisplayWave. The
+button only appears after a blocked attempt. Note that the old Control-click → Open
+trick no longer works — Apple removed it in macOS 15 Sequoia.
+
+### Option 3 — build from source
+
+```bash
+git clone https://github.com/kah-ve/DisplayWave.git
+cd DisplayWave
+./build.sh
+open DisplayWave.app
+```
+
+Needs the Xcode command line tools (`xcode-select --install`). As with Option 1,
+nothing is quarantined, so there's no `xattr` step.
+
+Whichever route you take, to have it start automatically: open the menu and click
+**Start at Login**.
 
 ## Features
 
@@ -28,7 +92,7 @@ https://news.ycombinator.com/item?id=49239013
   Shift but per monitor, and shown in kelvin rather than a meaningless percentage.
   6500K is your monitor's own white and leaves it untouched; 2000K is candlelight.
 - **Presets** — Day / Evening / Night to start with, and you can save your own. A
-  preset remembers brightness and colour temperature *per monitor*, so one click puts
+  preset remembers brightness and color temperature *per monitor*, so one click puts
   the whole desk back the way you had it. Add, rename and delete them in
   *Edit Presets…*.
 - **Resolution & refresh rate** — the mode line on each card is two dropdowns.
@@ -52,14 +116,15 @@ https://news.ycombinator.com/item?id=49239013
 ## Alternatives
 
 DisplayWave exists because none of these covered the same combination: power +
-brightness + warmth, per monitor, working even on DDC-less monitors, minimal, free.
+brightness + color temperature, per monitor, working even on DDC-less monitors,
+minimal, free.
 
 | App | What it's great at | Where DisplayWave differs |
 |---|---|---|
-| [MonitorControl](https://github.com/MonitorControl/MonitorControl) | Free, open source, DDC brightness/volume from your keyboard keys | DDC-only — on a monitor that doesn't answer DDC it can do nothing. No power off/on, no warmth. |
+| [MonitorControl](https://github.com/MonitorControl/MonitorControl) | Free, open source, DDC brightness/volume from your keyboard keys | DDC-only — on a monitor that doesn't answer DDC it can do nothing. No power off/on, no color temperature. |
 | [BetterDisplay](https://github.com/waydabber/BetterDisplay) | The power tool: virtual displays, EDID overrides, PIP, everything | Monitor disconnect — the feature this app was born for — sits in the paid Pro tier, inside a very large feature surface. |
 | [Lunar](https://lunar.fyi) | Adaptive brightness synced to ambient light or the built-in display | The adaptive features are paid, and hardware control is DDC-centric. |
-| f.lux / Night Shift | Automatic time-of-day color temperature | Applies to all displays equally; no per-monitor warmth, no brightness or power. |
+| f.lux / Night Shift | Automatic time-of-day color temperature | Applies to all displays equally; no per-monitor control, no brightness or power. |
 | [DisplayBuddy](https://displaybuddy.app) | Polished presets across many monitors | Paid, and hardware control is DDC-centric with the same gamma fallback this app uses — just not free. |
 | Amphetamine / `caffeinate` | Keep-awake with schedules and app triggers | DisplayWave has a keep-awake with a simple duration, sitting next to the monitor controls where you already are. |
 
@@ -67,58 +132,6 @@ If you want keyboard-key brightness on DDC monitors, use MonitorControl. If you
 want virtual displays or EDID overrides, buy BetterDisplay. If you want a small
 free menu that turns monitors off and dims and warms them regardless of DDC
 support, use this.
-
-## Install
-
-Requires macOS 13+ and the Xcode command line tools (`xcode-select --install`).
-Hardware backlight control uses the Apple Silicon display driver; everything else
-also works on Intel, where brightness falls back to GPU dimming.
-
-**Option 1 — download the release**
-
-1. Download the zip from [Releases](https://github.com/kah-ve/DisplayWave/releases)
-   and unzip it.
-2. Move `DisplayWave.app` to Applications.
-3. **Clear the quarantine flag** — this step is required. macOS marks every
-   downloaded app as quarantined, and because this app isn't notarized with Apple,
-   it will refuse to open ("unidentified developer" / "damaged") until the flag is
-   removed. Run this in Terminal:
-
-   ```bash
-   xattr -cr /Applications/DisplayWave.app
-   ```
-
-4. Open the app. It appears as a wave icon in the menu bar, not in the Dock.
-
-You don't need to try opening it first — run the command right after moving the
-app. And if you already double-clicked and got the warning, the same command fixes
-it. (Right-click → Open → Open also works, without the terminal.)
-
-**Option 2 — build from source**
-
-```bash
-git clone https://github.com/kah-ve/DisplayWave.git
-cd DisplayWave
-./build.sh
-open DisplayWave.app
-```
-
-Because you build it on your own machine there is no quarantine flag at all, so no
-`xattr` step — macOS only quarantines downloaded binaries.
-
-Either way, to have it start automatically: open the menu and click **Start at
-Login**.
-
-### Or hand it to Claude
-
-If you'd rather not touch a terminal, paste this into [Claude Code](https://claude.com/claude-code)
-and it will do the whole thing:
-
-> Clone https://github.com/kah-ve/DisplayWave and set it up on my Mac: build it with
-> ./build.sh and launch DisplayWave.app. Remind me to click "Start at Login" in its
-> menu so it starts automatically. Then tell me which of my monitors support
-> hardware backlight control and which will use software dimming, and what the
-> difference means.
 
 ## Presets
 
@@ -164,7 +177,7 @@ fails, it fails completely and no software can fix it.
   regardless of the monitor.
 
 DisplayWave uses DDC for brightness when a monitor supports it, because only that
-genuinely lowers light output, and falls back to gamma otherwise. Power and colour
+genuinely lowers light output, and falls back to gamma otherwise. Power and color
 temperature always take the OS-level route, so they work on every monitor.
 
 In the normal range the two are not stacked — the backlight does the dimming and
