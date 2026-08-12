@@ -24,15 +24,17 @@ https://news.ycombinator.com/item?id=49239013
   on the GPU instead, and the label says so (*Brightness · software*). At the bottom
   of the range both are used together, so a DDC monitor can still get properly dark
   even when its own backlight bottoms out too bright.
-- **Warmth** — shifts the picture warmer for evenings, like Night Shift but per
-  monitor.
+- **Color temperature** — shifts the white point warmer for evenings, like Night
+  Shift but per monitor, and shown in kelvin rather than a meaningless percentage.
+  6500K is your monitor's own white and leaves it untouched; 2000K is candlelight.
 - **Presets** — Day / Evening / Night to start with, and you can save your own. A
-  preset remembers brightness and warmth *per monitor*, so one click puts the whole
-  desk back the way you had it. Add, rename and delete them in *Edit Presets…*.
+  preset remembers brightness and colour temperature *per monitor*, so one click puts
+  the whole desk back the way you had it. Add, rename and delete them in
+  *Edit Presets…*.
 - **Resolution & refresh rate** — the mode line on each card is two dropdowns.
   Switching prefers HiDPI variants and keeps your refresh rate where possible.
-- **Quick percentages and nudge buttons** — one-click 35/50/75/100% plus −5/+5 fine
-  adjustment, on every slider.
+- **Quick values and nudge buttons** — one-click 35/50/75/100% brightness and
+  2000/2700/3400/4200/6500K, plus −/+ nudge buttons for fine adjustment on both.
 - **Keep Mac Awake** — caffeinate with a duration: *Always*, or a countdown you
   build with −5h / −1h / +1h / +5h, showing the time left. Deliberately
   session-only, so a forgotten toggle can't outlive the app. It holds two separate
@@ -122,11 +124,11 @@ and it will do the whole thing:
 
 Presets sit at the top of the menu. Three come built in, applying to every display:
 
-| Preset | Brightness | Warmth |
+| Preset | Brightness | Color temperature |
 |---|---|---|
-| Day | 100% | 0% |
-| Evening | 70% | 40% |
-| Night | 35% | 80% |
+| Day | 100% | 6500K — daylight, no shift |
+| Evening | 70% | 4200K — warm white |
+| Night | 35% | 2700K — incandescent |
 
 **Edit Presets…** is where you make them yours:
 
@@ -162,8 +164,8 @@ fails, it fails completely and no software can fix it.
   regardless of the monitor.
 
 DisplayWave uses DDC for brightness when a monitor supports it, because only that
-genuinely lowers light output, and falls back to gamma otherwise. Power and warmth
-always take the OS-level route, so they work on every monitor.
+genuinely lowers light output, and falls back to gamma otherwise. Power and colour
+temperature always take the OS-level route, so they work on every monitor.
 
 In the normal range the two are not stacked — the backlight does the dimming and
 gamma stays at full, so the picture isn't doubly dark. Below 25% they stack on
@@ -174,6 +176,31 @@ bright in a dark room, and this is the only way past it.
 Backlight values are scaled to the maximum the monitor reports over DDC (usually
 100, but the standard doesn't require it) and never written past it. The app asks
 for nothing the hardware hasn't said it accepts.
+
+### Kelvin, and why brightness isn't in nits
+
+Colour temperature is shown in kelvin because kelvin is what it actually is. The
+number isn't a label stuck on a slider position — it drives the gamma table. The
+white point of a blackbody at the chosen temperature is computed with Tanner
+Helland's fit to the Planckian locus, the same approximation Redshift and the
+various f.lux-alikes use, and normalised so 6500K comes out as no change at all.
+Ask for 2700K and you get a 2700K white point, near enough to see.
+
+Brightness stays in percent, and that's deliberate. Nits (cd/m²) are a real
+photometric unit, but nothing here can measure them:
+
+- DDC's luminance command (VCP `0x10`) is an opaque 0…max scale. The standard gives
+  it no photometric meaning, and monitors don't agree on one — 50 on one panel is
+  not 50 on another.
+- The gamma path dims the *image*, not the backlight. It changes what's sent to the
+  monitor, so it has no defined light output at all.
+- macOS exposes no API for a display's actual luminance.
+
+A nits figure would have to be invented from a peak-brightness number typed in off a
+spec sheet, then scaled by a curve nobody measured. That's a guess wearing a unit's
+clothing, and a wrong number in real units is worse than an honest relative one — so
+brightness reads as a percentage, which is also what MonitorControl, Lunar and macOS
+itself show.
 
 ### Detecting DDC support safely
 
@@ -190,11 +217,28 @@ A display reconfiguration — a mode change, sleep, replugging — also tears do
 DDC service handles, and writes through a stale handle silently vanish. The app
 re-resolves handles after every reconfiguration and wake (registry-only, no DDC
 traffic), and if a backlight write still fails it re-resolves once more and retries,
-so brightness keeps working without manual intervention.
+so brightness keeps working without manual intervention. A monitor plugged in after
+launch is probed then too, rather than being left on gamma-only dimming until the
+next restart.
 
 Use **Resync Monitors** after changing a cable or enabling DDC/CI in a monitor's own
 on-screen menu — that's the one case that needs a fresh probe rather than a fresh
 handle.
+
+#### The registry walk has to be retried
+
+Finding a monitor's DDC channel means walking the I/O registry, and IOKit invalidates
+a registry iterator the instant anything else modifies the registry mid-walk. It then
+stops early and returns a short list — no error, no partial-result flag. The registry
+churns constantly around displays, most of all in the seconds after one is plugged
+in, which is exactly when this runs.
+
+A truncated walk is indistinguishable from *this monitor has no DDC channel*, so
+ignoring it costs a perfectly capable monitor its backlight control for the whole
+session. Measured on a three-monitor desk, the first walk after launch reached 72 of
+3407 entries and found nothing at all; the immediate retry completed and found all
+three. So the walk checks `IOIteratorIsValid` afterwards and repeats itself, with a
+short backoff, until one pass gets all the way through a registry that held still.
 
 ### Notes
 

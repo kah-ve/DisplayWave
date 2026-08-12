@@ -21,6 +21,10 @@ private let ddcAddress: UInt8 = 0x37
 private let ddcDataAddress: UInt8 = 0x51
 let vcpLuminance: UInt8 = 0x10
 
+/// How many times to re-walk the I/O registry when it changes underneath us. Enough
+/// to outlast the churn of a display being plugged in, which is the case that matters.
+private let walkAttempts = 12
+
 private func checksum(_ seed: UInt8, _ data: [UInt8], _ range: Range<Int>) -> UInt8 {
     var c = seed
     for i in range { c ^= data[i] }
@@ -62,10 +66,17 @@ func ddcWrite(_ service: IOAVService, vcp: UInt8, value: Int) -> Bool {
 
 // MARK: - Finding a monitor's DDC channel
 
+/// One monitor's DDC channel as found in the I/O registry.
+typealias DDCService = (name: String, serial: Int64, service: IOAVService)
+
 /// Walks the I/O registry pairing each display's framebuffer with its AV service.
 /// This only reads the registry — no I2C traffic — so it is safe for any monitor.
-func ddcServices() -> [(name: String, serial: Int64, service: IOAVService)] {
-    var found: [(String, Int64, IOAVService)] = []
+///
+/// The walk visits every IOService entry on the machine — a few thousand of them,
+/// costing on the order of ten milliseconds — so it is done once and the result
+/// matched against every display, never once per display.
+func ddcServices() -> [DDCService] {
+    var found: [DDCService] = []
     let root = IORegistryGetRootEntry(kIOMainPortDefault)
     defer { IOObjectRelease(root) }
     var iterator = io_iterator_t()
@@ -74,37 +85,61 @@ func ddcServices() -> [(name: String, serial: Int64, service: IOAVService)] {
                                         &iterator) == KERN_SUCCESS else { return found }
     defer { IOObjectRelease(iterator) }
 
-    var name = "", serial: Int64 = 0
     let nameBuf = UnsafeMutablePointer<CChar>.allocate(capacity: MemoryLayout<io_name_t>.size)
     defer { nameBuf.deallocate() }
 
-    while true {
-        let entry = IOIteratorNext(iterator)
-        guard entry != IO_OBJECT_NULL else { break }
-        defer { IOObjectRelease(entry) }
-        guard IORegistryEntryGetName(entry, nameBuf) == KERN_SUCCESS else { continue }
-        let node = String(cString: nameBuf)
+    // IOKit invalidates a registry iterator the moment anything else modifies the
+    // registry mid-walk, and then just stops early — no error, no partial-result
+    // flag, simply a short list. The registry churns constantly around displays,
+    // most of all in the seconds after one is plugged in, which is exactly when this
+    // runs. A truncated walk is indistinguishable from "this monitor has no DDC
+    // channel", so the cost of ignoring it is a perfectly capable monitor silently
+    // losing its backlight control for the rest of the session.
+    //
+    // `IOIteratorIsValid` reports it after the fact and `IOIteratorReset` makes the
+    // iterator usable again, so the walk is simply repeated until one pass gets all
+    // the way through a registry that held still.
+    for attempt in 0 ..< walkAttempts {
+        found.removeAll(keepingCapacity: true)
+        var name = "", serial: Int64 = 0
+        IOIteratorReset(iterator)
 
-        if node.contains("AppleCLCD2") || node.contains("IOMobileFramebufferShim") {
-            name = ""
-            serial = 0
-            if let attrs = IORegistryEntryCreateCFProperty(entry, "DisplayAttributes" as CFString,
-                                                           kCFAllocatorDefault, 0)?
-                .takeRetainedValue() as? NSDictionary,
-               let product = attrs.value(forKey: "ProductAttributes") as? NSDictionary {
-                name = product.value(forKey: "ProductName") as? String ?? ""
-                serial = product.value(forKey: "SerialNumber") as? Int64 ?? 0
-            }
-        } else if node.contains("DCPAVServiceProxy"), !name.isEmpty {
-            if let location = IORegistryEntryCreateCFProperty(entry, "Location" as CFString,
-                                                              kCFAllocatorDefault, 0)?
-                .takeRetainedValue() as? String, location == "External",
-               let service = IOAVServiceCreateWithService(kCFAllocatorDefault, entry)?
-                .takeRetainedValue() {
-                found.append((name, serial, service))
+        while true {
+            let entry = IOIteratorNext(iterator)
+            guard entry != IO_OBJECT_NULL else { break }
+            defer { IOObjectRelease(entry) }
+            guard IORegistryEntryGetName(entry, nameBuf) == KERN_SUCCESS else { continue }
+            let node = String(cString: nameBuf)
+
+            if node.contains("AppleCLCD2") || node.contains("IOMobileFramebufferShim") {
+                name = ""
+                serial = 0
+                if let attrs = IORegistryEntryCreateCFProperty(entry, "DisplayAttributes" as CFString,
+                                                               kCFAllocatorDefault, 0)?
+                    .takeRetainedValue() as? NSDictionary,
+                   let product = attrs.value(forKey: "ProductAttributes") as? NSDictionary {
+                    name = product.value(forKey: "ProductName") as? String ?? ""
+                    serial = product.value(forKey: "SerialNumber") as? Int64 ?? 0
+                }
+            } else if node.contains("DCPAVServiceProxy"), !name.isEmpty {
+                if let location = IORegistryEntryCreateCFProperty(entry, "Location" as CFString,
+                                                                  kCFAllocatorDefault, 0)?
+                    .takeRetainedValue() as? String, location == "External",
+                   let service = IOAVServiceCreateWithService(kCFAllocatorDefault, entry)?
+                    .takeRetainedValue() {
+                    found.append((name, serial, service))
+                }
             }
         }
+
+        if IOIteratorIsValid(iterator) != 0 { return found }
+        // Still settling. Back off briefly rather than spinning against the churn —
+        // this always runs off the main thread, so waiting costs nothing on screen.
+        if attempt < walkAttempts - 1 { usleep(30000) }
     }
+    // Every attempt was cut short. Returning what little was found is safe: callers
+    // treat a display with no channel as simply not classified yet, and try again
+    // on the next reconfiguration rather than writing it off.
     return found
 }
 
@@ -114,11 +149,11 @@ func displaySerial(_ id: CGDirectDisplayID) -> Int64 {
     return dict[kDisplaySerialNumber] as? Int64 ?? 0
 }
 
-/// Matches a display to its DDC channel by product name, disambiguating identical
-/// models by serial number. A display can expose several AV services; they behave
-/// alike, so the first is used.
-func ddcService(for display: Display) -> IOAVService? {
-    let candidates = ddcServices().filter {
+/// Matches a display to its DDC channel within a registry snapshot, by product name,
+/// disambiguating identical models by serial number. A display can expose several AV
+/// services; they behave alike, so the first is used.
+func ddcService(for display: Display, in services: [DDCService]) -> IOAVService? {
+    let candidates = services.filter {
         $0.name.caseInsensitiveCompare(display.name) == .orderedSame
     }
     guard !candidates.isEmpty else { return nil }
@@ -129,6 +164,12 @@ func ddcService(for display: Display) -> IOAVService? {
         }
     }
     return candidates[0].service
+}
+
+/// The same lookup for a single display, walking the registry for it. Only worth it
+/// when there's one display to resolve; for several, walk once and match in bulk.
+func ddcService(for display: Display) -> IOAVService? {
+    ddcService(for: display, in: ddcServices())
 }
 
 // MARK: - Capability detection
@@ -192,29 +233,45 @@ final class Capabilities {
         return modes[name] != nil
     }
 
-    /// Probes any display not already known. Runs entirely off the main thread.
-    func probeUnknown(displays: [Display], completion: @escaping () -> Void) {
-        let pending = displays.filter { !isKnown($0.name) || service(for: $0.name) == nil }
-        guard !pending.isEmpty else { return }
+    /// Brings the table in line with what's actually plugged in, and the only entry
+    /// point that needs calling: it re-resolves the channel for every monitor already
+    /// known to answer DDC, and probes any monitor never seen before.
+    ///
+    /// Both jobs used to be separate passes, and only the first ran when the display
+    /// configuration changed — so a monitor plugged in after launch was never probed
+    /// and stayed stuck on gamma-only dimming for the rest of the session. Doing them
+    /// together fixes that, and means one registry walk covers every display instead
+    /// of one walk apiece.
+    ///
+    /// Runs entirely off the main thread, and always calls `completion` on it.
+    func sync(displays: [Display], completion: @escaping () -> Void) {
+        // A monitor already known not to answer is left completely alone — its
+        // channel is never touched again, which is the whole point of caching.
+        let pending = displays.filter { !isKnown($0.name) || mode(for: $0.name) == .hardware }
+        guard !pending.isEmpty else { DispatchQueue.main.async(execute: completion); return }
         DispatchQueue.global(qos: .utility).async {
+            let registry = ddcServices()
             for display in pending {
-                let known = self.isKnown(display.name)
-                guard let service = ddcService(for: display) else {
-                    self.store(display.name, .software, nil)
+                let service = ddcService(for: display, in: registry)
+                if self.isKnown(display.name) {
+                    // Known to answer DDC, so this is only ever a re-attach. A handle
+                    // missing right now usually means the display is still settling
+                    // after a reconfiguration, so the verdict is left alone and tried
+                    // again next time rather than demoted to software for good.
+                    if let service { self.store(display.name, .hardware, service) }
                     continue
                 }
-                // Re-attach the service for a monitor already known to be hardware,
-                // without spending another probe on it.
-                if known, self.mode(for: display.name) == .hardware {
-                    self.store(display.name, .hardware, service)
-                    continue
-                }
-                if known {
-                    continue  // already known to be software; don't touch its channel
-                }
+                // Never seen before. No AV service at all is left unrecorded rather
+                // than written off as software: the registry can come up short while
+                // a display is still settling, and that shouldn't permanently cost a
+                // monitor its backlight control. Costs nothing to retry — it's a
+                // filter over a list already in hand, with no DDC traffic behind it.
+                guard let service else { continue }
                 if let max = Self.probe(service) {
                     self.store(display.name, .hardware, service, max: max)
                 } else {
+                    // It had a channel and didn't answer on it. That's a real verdict,
+                    // paid for with a real probe, so it's recorded and never retried.
                     self.store(display.name, .software, nil)
                 }
             }
@@ -236,24 +293,7 @@ final class Capabilities {
         return done.wait(timeout: .now() + 2.5) == .success ? box.max : nil
     }
 
-    /// Re-resolves the service for every display already known to be hardware.
-    /// Display reconfigurations — mode changes, sleep, replugging — tear down the
-    /// old service objects, and writes through a stale one silently vanish. This is
-    /// registry-only, no DDC traffic, so it's safe to run on every reconfiguration.
-    func reattachServices(displays: [Display], completion: @escaping () -> Void) {
-        let hardware = displays.filter { mode(for: $0.name) == .hardware }
-        guard !hardware.isEmpty else { DispatchQueue.main.async(execute: completion); return }
-        DispatchQueue.global(qos: .utility).async {
-            for d in hardware {
-                if let service = ddcService(for: d) {
-                    self.store(d.name, .hardware, service)
-                }
-            }
-            DispatchQueue.main.async(execute: completion)
-        }
-    }
-
-    /// Same, for one display, synchronously — used to retry a write that just failed.
+    /// For one display, synchronously — used to retry a write that just failed.
     func reattach(name: String, id: CGDirectDisplayID) -> IOAVService? {
         guard mode(for: name) == .hardware else { return nil }
         let placeholder = Display(id: id, name: name, active: true, width: 0, height: 0, refresh: 0)
@@ -279,12 +319,26 @@ final class Capabilities {
 /// A DDC write takes tens of milliseconds, far slower than a slider emits changes.
 /// Values are coalesced per display so dragging stays smooth and the monitor always
 /// ends up at the value the slider was left on.
+///
+/// Each display drains on its own queue. They used to share one, which meant a write
+/// to a slow monitor held up every other monitor behind it — and since a channel that
+/// stops answering can block inside the kernel for a very long time, one sulking
+/// monitor could take the brightness of the whole desk with it. Separate queues also
+/// let a preset apply to every display at once instead of one after another.
 final class Backlight {
     static let shared = Backlight()
-    private let queue = DispatchQueue(label: "displaywave.ddc", qos: .userInitiated)
     private let lock = NSLock()
+    private var queues: [CGDirectDisplayID: DispatchQueue] = [:]
     private var latest: [CGDirectDisplayID: Int] = [:]
     private var busy: Set<CGDirectDisplayID> = []
+
+    /// The caller must hold `lock`.
+    private func queue(for id: CGDirectDisplayID) -> DispatchQueue {
+        if let existing = queues[id] { return existing }
+        let queue = DispatchQueue(label: "displaywave.ddc.\(id)", qos: .userInitiated)
+        queues[id] = queue
+        return queue
+    }
 
     /// `ceiling` is the monitor's own reported maximum; values are scaled into its
     /// range and never sent past it.
@@ -294,6 +348,7 @@ final class Backlight {
         latest[id] = value
         let alreadyDraining = busy.contains(id)
         if !alreadyDraining { busy.insert(id) }
+        let queue = queue(for: id)
         lock.unlock()
         guard !alreadyDraining else { return }
         queue.async { self.drain(id: id, name: name, service: service) }

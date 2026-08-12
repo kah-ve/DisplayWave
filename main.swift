@@ -8,10 +8,12 @@ import ServiceManagement
 //   Power    — connects/disconnects the display at the OS level via the private
 //              CGSConfigureDisplayEnabled SPI. The monitor loses signal and enters
 //              standby on its own, so this needs no DDC support from the monitor.
-//   Brightness / warmth
+//   Brightness / colour temperature
 //            — applied through the GPU's gamma transfer table rather than by asking
 //              the monitor to change its own settings. Also works without DDC, which
 //              matters because most monitors on this desk don't answer DDC at all.
+//              Temperature is a real kelvin figure that drives the table, not a
+//              slider position with a label on it.
 //   Mode     — resolution and refresh rate, switched the same way System Settings
 //              does it, from dropdowns on each display's card.
 //
@@ -22,7 +24,54 @@ import ServiceManagement
 
 struct Settings {
     var brightness: Double = 1.0
-    var warmth: Double = 0.0
+    var kelvin: Double = neutralKelvin
+}
+
+// MARK: - Colour temperature
+
+/// The white point a monitor already shows without help. Setting this asks for no
+/// change at all, which is why it's the cool end of the slider.
+let neutralKelvin: Double = 6500
+/// As warm as the slider goes — candlelight. Below roughly this point the blue
+/// channel has nothing left to give up, so going further mostly just clips.
+let warmestKelvin: Double = 2000
+
+/// The white point of a blackbody at `kelvin`, as the per-channel gains that produce
+/// it, normalised so `neutralKelvin` comes out as no change whatsoever.
+///
+/// This is Tanner Helland's fit to the Planckian locus — the same approximation
+/// Redshift and the various f.lux-alikes use. It lands within a couple of percent
+/// across the range that matters here, and it's already in sRGB's encoded domain,
+/// which is the domain `CGSetDisplayTransferByFormula` scales in.
+func whitePoint(kelvin: Double) -> (r: Double, g: Double, b: Double) {
+    func channels(_ kelvin: Double) -> (Double, Double, Double) {
+        let t = min(40000, max(1000, kelvin)) / 100
+        let r = t <= 66 ? 255 : 329.698_727_446 * pow(t - 60, -0.133_204_759_2)
+        let g = t <= 66 ? 99.470_802_586_1 * log(t) - 161.119_568_166_1
+                        : 288.122_169_528_3 * pow(t - 60, -0.075_514_849_2)
+        let b = t >= 66 ? 255
+              : t <= 19 ? 0
+              : 138.517_731_223_1 * log(t - 10) - 305.044_792_730_7
+        return (r, g, b)
+    }
+    let wanted = channels(kelvin)
+    let neutral = channels(neutralKelvin)
+    func gain(_ v: Double, _ n: Double) -> Double { min(1, max(0, v / n)) }
+    return (gain(wanted.0, neutral.0), gain(wanted.1, neutral.1), gain(wanted.2, neutral.2))
+}
+
+/// Warmth used to be stored as a bare 0…1 amount rather than a temperature. The two
+/// can't be confused — no temperature this app writes is anywhere near 1 — so old
+/// values are recognised on sight and mapped onto the temperature they were really
+/// producing, leaving saved presets looking the way they always did.
+///
+/// 3800 K is where the old formula's fully-warm end actually sat: it pulled green to
+/// 0.82 and blue to 0.55, which is about a 3800 K white point.
+func migratedKelvin(_ stored: Double) -> Double {
+    guard stored <= 1.0 else { return stored }
+    // Onto the same grid the slider works in, so a migrated value reads back exactly
+    // as it was stored rather than shifting the first time it's touched.
+    return Scale.warmth.snap(neutralKelvin - stored * (neutralKelvin - 3800))
 }
 
 struct Display {
@@ -40,11 +89,59 @@ struct Display {
     }
 }
 
-let brightnessPresets: [Double] = [0.35, 0.50, 0.75, 1.0]
-let warmthPresets: [Double] = [0.0, 0.25, 0.50, 0.75, 1.0]
+func percentString(_ v: Double) -> String { "\(Int((v * 100).rounded()))%" }
+func kelvinString(_ v: Double) -> String { "\(Int(v.rounded()))K" }
+
+/// How one slider's numbers behave: the range it covers, the finest change it can
+/// show, how far the nudge buttons move, and the quick values under it.
+///
+/// Brightness is a proportion and reads as a percentage; colour temperature is a
+/// real unit and reads in kelvin. Keeping both descriptions in one shape is what
+/// lets the two controls share their layout and their handlers.
+struct Scale {
+    let min: Double
+    let max: Double
+    /// The smallest step the readout can distinguish. Values are snapped to it, so
+    /// what's stored is always exactly what's on screen — which in turn is what makes
+    /// matching a value against the preset buttons exact rather than approximate.
+    let quantum: Double
+    /// How far the − and + buttons move, and what they're labelled with.
+    let step: Double
+    let stepLabel: String
+    let presets: [Double]
+    let unit: (Double) -> String
+
+    func snap(_ v: Double) -> Double {
+        Swift.min(max, Swift.max(min, (v / quantum).rounded() * quantum))
+    }
+
+    func describe(_ v: Double) -> String { unit(snap(v)) }
+
+    /// Which preset button a value sits on, or -1 for none of them.
+    func presetIndex(_ v: Double) -> Int {
+        let snapped = snap(v)
+        return presets.firstIndex { abs($0 - snapped) < quantum / 2 } ?? -1
+    }
+
+    /// Brightness bottoms out lower on a monitor that can dim its own backlight,
+    /// because there the floor only has to keep the menu readable, not the whole
+    /// picture.
+    static func brightness(hardware: Bool) -> Scale {
+        Scale(min: hardware ? 0.05 : 0.15, max: 1.0, quantum: 0.01, step: 0.05, stepLabel: "5",
+              presets: [0.35, 0.50, 0.75, 1.0], unit: percentString)
+    }
+
+    /// Warm at the left, daylight at the right — the same direction as brightness
+    /// beside it, so the left end of both sliders is the night-time end.
+    /// The presets are the familiar light sources: candle, incandescent, halogen,
+    /// warm white, and the monitor's own white point.
+    static let warmth = Scale(min: warmestKelvin, max: neutralKelvin, quantum: 100,
+                              step: 100, stepLabel: "100",
+                              presets: [2000, 2700, 3400, 4200, 6500], unit: kelvinString)
+}
 
 /// A named snapshot of how the desk should look: what each monitor's brightness and
-/// warmth should be. One click puts every display back to it.
+/// colour temperature should be. One click puts every display back to it.
 struct Preset {
     /// Settings under this key apply to any display the preset doesn't name, so a
     /// preset still does something sensible on a monitor plugged in later.
@@ -68,9 +165,9 @@ struct Preset {
 }
 
 let defaultPresets = [
-    Preset(name: "Day", settings: [Preset.anyDisplay: Settings(brightness: 1.0, warmth: 0.0)]),
-    Preset(name: "Evening", settings: [Preset.anyDisplay: Settings(brightness: 0.70, warmth: 0.40)]),
-    Preset(name: "Night", settings: [Preset.anyDisplay: Settings(brightness: 0.35, warmth: 0.80)]),
+    Preset(name: "Day", settings: [Preset.anyDisplay: Settings(brightness: 1.0, kelvin: 6500)]),
+    Preset(name: "Evening", settings: [Preset.anyDisplay: Settings(brightness: 0.70, kelvin: 4200)]),
+    Preset(name: "Night", settings: [Preset.anyDisplay: Settings(brightness: 0.35, kelvin: 2700)]),
 ]
 
 /// The user's presets, in menu order. Editable via "Edit Presets…".
@@ -85,7 +182,7 @@ final class PresetStore {
             guard let name = entry["name"] as? String,
                   let values = entry["settings"] as? [String: [Double]] else { return nil }
             let settings = values.compactMapValues { v in
-                v.count == 2 ? Settings(brightness: v[0], warmth: v[1]) : nil
+                v.count == 2 ? Settings(brightness: v[0], kelvin: migratedKelvin(v[1])) : nil
             }
             return Preset(name: name, settings: settings)
         }
@@ -95,7 +192,7 @@ final class PresetStore {
     private func save() {
         UserDefaults.standard.set(presets.map { preset in
             ["name": preset.name,
-             "settings": preset.settings.mapValues { [$0.brightness, $0.warmth] }]
+             "settings": preset.settings.mapValues { [$0.brightness, $0.kelvin] }]
         }, forKey: key)
     }
 
@@ -146,12 +243,32 @@ final class PresetStore {
 
 // MARK: - Display modes
 
+// Anything derived from the display configuration is cached until that configuration
+// changes, which is the only thing that can invalidate it. The menu is rebuilt from
+// scratch every time it opens, and without this it re-derived all of it each time.
+//
+// Main thread only — everything that reads them builds its display list on the main
+// thread before handing work off.
+private var modeCache: [CGDirectDisplayID: [CGDisplayMode]] = [:]
+private var nameCache: [CGDirectDisplayID: String] = [:]
+
+func invalidateDisplayCaches() {
+    modeCache.removeAll()
+    nameCache.removeAll()
+}
+
 /// Every mode the monitor advertises that macOS considers usable for a desktop,
 /// including HiDPI variants of the same point size.
+///
+/// Enumerating them costs a few milliseconds per monitor — measurable when the menu
+/// builds a card per display — and the answer only moves when the configuration does.
 func displayModes(_ id: CGDirectDisplayID) -> [CGDisplayMode] {
+    if let cached = modeCache[id] { return cached }
     let opts = [kCGDisplayShowDuplicateLowResolutionModes: kCFBooleanTrue!] as CFDictionary
     let all = CGDisplayCopyAllDisplayModes(id, opts) as? [CGDisplayMode] ?? []
-    return all.filter { $0.isUsableForDesktopGUI() }
+    let usable = all.filter { $0.isUsableForDesktopGUI() }
+    modeCache[id] = usable
+    return usable
 }
 
 /// Distinct point resolutions, largest first.
@@ -195,13 +312,21 @@ func setMode(_ id: CGDirectDisplayID, _ mode: CGDisplayMode) {
 
 // MARK: - Display enumeration
 
+/// The monitor's product name, which is also the key everything is stored under.
+///
+/// Building the CoreDisplay dictionary this reads isn't free, and `onlineDisplays()`
+/// asks for one per display every time it runs — several times over for a single
+/// menu open — so the answer is kept until the configuration changes.
 func displayName(_ id: CGDirectDisplayID) -> String {
+    if let cached = nameCache[id] { return cached }
+    var name = CGDisplayIsBuiltin(id) != 0 ? "Built-in Display" : "Display \(id)"
     if let dict = CoreDisplay_DisplayCreateInfoDictionary(id)?.takeRetainedValue() as NSDictionary?,
        let names = dict["DisplayProductName"] as? [String: String],
-       let name = names["en_US"] ?? names.first?.value {
-        return name
+       let product = names["en_US"] ?? names.first?.value {
+        name = product
     }
-    return CGDisplayIsBuiltin(id) != 0 ? "Built-in Display" : "Display \(id)"
+    nameCache[id] = name
+    return name
 }
 
 func onlineDisplays() -> [Display] {
@@ -229,7 +354,7 @@ final class Store {
     private init() {
         if let raw = UserDefaults.standard.dictionary(forKey: key) as? [String: [Double]] {
             for (name, v) in raw where v.count == 2 {
-                cache[name] = Settings(brightness: v[0], warmth: v[1])
+                cache[name] = Settings(brightness: v[0], kelvin: migratedKelvin(v[1]))
             }
         }
     }
@@ -238,11 +363,35 @@ final class Store {
         get { cache[name] ?? Settings() }
         set {
             cache[name] = newValue
-            UserDefaults.standard.set(cache.mapValues { [$0.brightness, $0.warmth] }, forKey: key)
+            scheduleFlush()
         }
     }
 
+    // A slider drag lands dozens of changes a second, and each one used to rebuild
+    // and write the whole settings dictionary. Only the final value matters to disk,
+    // so writes are coalesced; the in-memory cache is authoritative meanwhile, so
+    // nothing reads a stale value, and the worst a hard crash mid-drag can cost is a
+    // fraction of a second of slider movement.
+    private var pendingFlush: DispatchWorkItem?
+    private static let flushDelay: TimeInterval = 0.3
+
+    private func scheduleFlush() {
+        pendingFlush?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.flush() }
+        pendingFlush = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.flushDelay, execute: work)
+    }
+
+    /// Writes any pending change out now.
+    func flush() {
+        pendingFlush?.cancel()
+        pendingFlush = nil
+        UserDefaults.standard.set(cache.mapValues { [$0.brightness, $0.kelvin] }, forKey: key)
+    }
+
     func reset() {
+        pendingFlush?.cancel()
+        pendingFlush = nil
         cache = [:]
         UserDefaults.standard.removeObject(forKey: key)
     }
@@ -250,16 +399,17 @@ final class Store {
 
 // MARK: - Applying settings
 
-// Brightness scales the whole output; warmth pulls down green and blue so what's
-// left skews red. The brightness floor keeps a screen from going fully black, which
-// would leave no way to see the menu that brings it back.
-func applyGamma(_ id: CGDirectDisplayID, brightness: Double, warmth: Double, floor: Double = 0.15) {
-    let b = Float(max(floor, min(1.0, brightness)))
-    let w = Float(max(0.0, min(1.0, warmth)))
+// Brightness scales all three channels together; the colour temperature scales them
+// against each other, holding back green and blue until what's left is the white of
+// a blackbody at that temperature. The brightness floor keeps a screen from going
+// fully black, which would leave no way to see the menu that brings it back.
+func applyGamma(_ id: CGDirectDisplayID, brightness: Double, kelvin: Double, floor: Double = 0.15) {
+    let b = max(floor, min(1.0, brightness))
+    let w = whitePoint(kelvin: kelvin)
     CGSetDisplayTransferByFormula(id,
-                                  0, b, 1.0,
-                                  0, b * (1.0 - 0.18 * w), 1.0,
-                                  0, b * (1.0 - 0.45 * w), 1.0)
+                                  0, Float(b * w.r), 1.0,
+                                  0, Float(b * w.g), 1.0,
+                                  0, Float(b * w.b), 1.0)
 }
 
 /// Takes every display far below the normal brightness floors — for leaving screens
@@ -379,14 +529,15 @@ func apply(_ display: Display) {
         ? Capabilities.shared.service(for: display.name) : nil
 
     if Blackout.shared.active {
-        // Backlight as low as it goes and gamma past its usual floor. Full warmth
-        // too — blue light is the part that keeps you awake.
+        // Backlight as low as it goes and gamma past its usual floor. As warm as it
+        // goes too — blue light is the part that keeps you awake.
         if let service = hardwareService {
             Backlight.shared.set(percent: Blackout.level, id: display.id, name: display.name,
                                  service: service,
                                  ceiling: Capabilities.shared.maxLuminance(for: display.name))
         }
-        applyGamma(display.id, brightness: Blackout.level, warmth: 1.0, floor: Blackout.level)
+        applyGamma(display.id, brightness: Blackout.level, kelvin: warmestKelvin,
+                   floor: Blackout.level)
         return
     }
 
@@ -397,9 +548,9 @@ func apply(_ display: Display) {
                              ceiling: Capabilities.shared.maxLuminance(for: display.name))
         let gamma = s.brightness < backlightFloor
             ? max(deepDimFloor, s.brightness / backlightFloor) : 1.0
-        applyGamma(display.id, brightness: gamma, warmth: s.warmth)
+        applyGamma(display.id, brightness: gamma, kelvin: s.kelvin)
     } else {
-        applyGamma(display.id, brightness: s.brightness, warmth: s.warmth)
+        applyGamma(display.id, brightness: s.brightness, kelvin: s.kelvin)
     }
 }
 
@@ -419,11 +570,36 @@ func applyPreset(_ preset: Preset) {
     AppDelegate.shared?.refreshVisibleCards()
 }
 
-/// Refreshes the DDC service handles first, then reapplies — for after any display
-/// reconfiguration, which invalidates the old handles.
+/// Brings everything back in line after a display reconfiguration: drops the caches
+/// that the configuration invalidated, re-resolves DDC handles (the old ones are
+/// dead), probes anything newly plugged in, then reapplies every setting.
 func resyncAndApply() {
-    Capabilities.shared.reattachServices(displays: onlineDisplays().filter(\.active)) {
+    invalidateDisplayCaches()
+    Capabilities.shared.sync(displays: onlineDisplays().filter(\.active)) {
         applyAll()
+    }
+}
+
+/// Reconfigurations arrive in bursts — a callback per display, several times over,
+/// for what a person experiences as one act of plugging a monitor in. Each used to
+/// schedule its own resync, so a single plug meant a pile of registry walks and
+/// rounds of DDC traffic all racing each other. They now collapse into one pass that
+/// runs once the dust has settled.
+enum Resync {
+    private static var pending: DispatchWorkItem?
+    /// Long enough for the burst to finish arriving and for the displays themselves
+    /// to come back — gamma won't stick on a display that is still waking up.
+    static let settling: TimeInterval = 1.5
+
+    /// Main thread only, which is where the reconfiguration callback is delivered.
+    static func schedule(after delay: TimeInterval = settling) {
+        pending?.cancel()
+        let work = DispatchWorkItem {
+            pending = nil
+            resyncAndApply()
+        }
+        pending = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 }
 
@@ -563,12 +739,10 @@ func label(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular,
     return f
 }
 
-func percentString(_ v: Double) -> String { "\(Int((v * 100).rounded()))%" }
-
 // MARK: - Display card
 
 // One self-contained panel per display: identity and current mode on top, then
-// brightness and warmth, each with a slider and its own preset buttons.
+// brightness and colour temperature, each with a slider and its own preset buttons.
 final class DisplayCard: FlippedView {
     static let width: CGFloat = 320
     static let height: CGFloat = 190
@@ -578,6 +752,12 @@ final class DisplayCard: FlippedView {
     private weak var hostMenu: NSMenu?
     private let resolutionPopup = NSPopUpButton()
     private let refreshPopup = NSPopUpButton()
+
+    // A monitor that answers DDC dims its own backlight, so it can go genuinely
+    // dark; everything else can only darken the image the GPU sends it. That changes
+    // how low brightness is allowed to go, so the scale is settled up front.
+    private let brightnessScale: Scale
+    private let warmthScale = Scale.warmth
 
     private let brightnessSlider = NSSlider()
     private let warmthSlider = NSSlider()
@@ -590,12 +770,17 @@ final class DisplayCard: FlippedView {
         self.display = display
         self.allModes = displayModes(display.id)
         self.hostMenu = menu
+        let hardware = Capabilities.shared.mode(for: display.name) == .hardware
+        let brightnessScale = Scale.brightness(hardware: hardware)
+        self.brightnessScale = brightnessScale
         let s = Store.shared[display.name]
-        brightnessReadout = label(percentString(s.brightness), size: 11, color: .secondaryLabelColor, align: .right)
-        warmthReadout = label(percentString(s.warmth), size: 11, color: .secondaryLabelColor, align: .right)
-        brightnessPresetControl = NSSegmentedControl(labels: brightnessPresets.map { percentString($0) },
+        brightnessReadout = label(brightnessScale.describe(s.brightness), size: 11,
+                                  color: .secondaryLabelColor, align: .right)
+        warmthReadout = label(Scale.warmth.describe(s.kelvin), size: 11,
+                              color: .secondaryLabelColor, align: .right)
+        brightnessPresetControl = NSSegmentedControl(labels: brightnessScale.presets.map(brightnessScale.unit),
                                                      trackingMode: .selectOne, target: nil, action: nil)
-        warmthPresetControl = NSSegmentedControl(labels: warmthPresets.map { percentString($0) },
+        warmthPresetControl = NSSegmentedControl(labels: Scale.warmth.presets.map(Scale.warmth.unit),
                                                  trackingMode: .selectOne, target: nil, action: nil)
         super.init(frame: NSRect(x: 0, y: 0, width: Self.width, height: Self.height))
 
@@ -630,28 +815,25 @@ final class DisplayCard: FlippedView {
         setupModePopups(y: y, pad: pad)
         y += 26
 
-        // A monitor that answers DDC dims its own backlight, so it can go genuinely
-        // dark; everything else can only darken the image the GPU sends it.
-        let hardware = Capabilities.shared.mode(for: display.name) == .hardware
         y = addControlGroup(title: hardware ? "Brightness" : "Brightness · software",
                             icon: hardware ? "sun.max.fill" : "sun.max", tint: .systemYellow,
                             tooltip: hardware
                                 ? "Adjusts this monitor's backlight. Past the backlight's lowest useful setting, the image is dimmed as well so it can go darker still."
                                 : "This monitor doesn't answer DDC, so the image is dimmed on the GPU instead of lowering the backlight",
-                            slider: brightnessSlider, minValue: hardware ? 0.05 : 0.15, value: s.brightness,
-                            readout: brightnessReadout, action: #selector(brightnessChanged),
+                            scale: brightnessScale, value: s.brightness,
+                            slider: brightnessSlider, readout: brightnessReadout,
+                            action: #selector(brightnessChanged),
                             stepAction: #selector(brightnessStepped(_:)),
                             presets: brightnessPresetControl, presetAction: #selector(brightnessPresetPicked),
-                            presetValues: brightnessPresets, current: s.brightness,
                             y: y, pad: pad, contentWidth: contentWidth)
         y += 10
-        _ = addControlGroup(title: "Warmth", icon: "sunset.fill", tint: .systemOrange,
-                            tooltip: "Shifts the picture warmer by reducing blue on the GPU",
-                            slider: warmthSlider, minValue: 0.0, value: s.warmth,
-                            readout: warmthReadout, action: #selector(warmthChanged),
+        _ = addControlGroup(title: "Color temperature", icon: "sunset.fill", tint: .systemOrange,
+                            tooltip: "The white the picture is shifted towards, in kelvin. \(Int(neutralKelvin))K is the monitor's own white point and leaves it alone; lower is warmer — 4200K warm white, 3400K halogen, 2700K incandescent, \(Int(warmestKelvin))K candlelight. Done on the GPU, so it works on any monitor.",
+                            scale: warmthScale, value: s.kelvin,
+                            slider: warmthSlider, readout: warmthReadout,
+                            action: #selector(warmthChanged),
                             stepAction: #selector(warmthStepped(_:)),
                             presets: warmthPresetControl, presetAction: #selector(warmthPresetPicked),
-                            presetValues: warmthPresets, current: s.warmth,
                             y: y, pad: pad, contentWidth: contentWidth)
     }
 
@@ -700,10 +882,10 @@ final class DisplayCard: FlippedView {
     /// Lays out a labelled control: caption row with the current value, the slider
     /// beneath it, and the preset buttons under that.
     private func addControlGroup(title: String, icon: String, tint: NSColor, tooltip: String,
-                                 slider: NSSlider,
-                                 minValue: Double, value: Double, readout: NSTextField,
-                                 action: Selector, stepAction: Selector, presets: NSSegmentedControl,
-                                 presetAction: Selector, presetValues: [Double], current: Double,
+                                 scale: Scale, value: Double,
+                                 slider: NSSlider, readout: NSTextField,
+                                 action: Selector, stepAction: Selector,
+                                 presets: NSSegmentedControl, presetAction: Selector,
                                  y: CGFloat, pad: CGFloat, contentWidth: CGFloat) -> CGFloat {
         var y = y
         let iconView = NSImageView(frame: NSRect(x: pad, y: y + 1, width: 13, height: 13))
@@ -721,24 +903,32 @@ final class DisplayCard: FlippedView {
         addSubview(readout)
         y += 17
 
-        slider.minValue = minValue
-        slider.maxValue = 1.0
+        // Tiny nudge buttons for fine adjustment without aiming at the slider. They
+        // take exactly the width their labels need — "−100" is a good deal wider than
+        // "−5" — and the slider gets whatever is left.
+        let stepFont = NSFont.systemFont(ofSize: 10)
+        let stepWidth = ceil(("−" + scale.stepLabel as NSString)
+            .size(withAttributes: [.font: stepFont]).width) + 12
+        let stepBlock = stepWidth * 2 + 2
+
+        slider.minValue = scale.min
+        slider.maxValue = scale.max
         slider.doubleValue = value
         slider.isContinuous = true
         slider.target = self
         slider.action = action
-        slider.frame = NSRect(x: pad, y: y, width: contentWidth - 62, height: 19)
+        slider.frame = NSRect(x: pad, y: y, width: contentWidth - stepBlock - 6, height: 19)
         addSubview(slider)
 
-        // Tiny nudge buttons for fine adjustment without aiming at the slider.
-        for (i, (tag, title)) in [(-1, "−5"), (1, "+5")].enumerated() {
-            let button = NSButton(title: title, target: self, action: stepAction)
+        for (i, tag) in [-1, 1].enumerated() {
+            let button = NSButton(title: (tag < 0 ? "−" : "+") + scale.stepLabel,
+                                  target: self, action: stepAction)
             button.tag = tag
             button.bezelStyle = .rounded
             button.controlSize = .mini
-            button.font = .systemFont(ofSize: 10)
-            button.frame = NSRect(x: pad + contentWidth - 56 + CGFloat(i) * 29, y: y - 1,
-                                  width: 27, height: 18)
+            button.font = stepFont
+            button.frame = NSRect(x: pad + contentWidth - stepBlock + CGFloat(i) * (stepWidth + 2),
+                                  y: y - 1, width: stepWidth, height: 18)
             addSubview(button)
         }
         y += 21
@@ -749,7 +939,7 @@ final class DisplayCard: FlippedView {
         presets.selectedSegmentBezelColor = tint.withAlphaComponent(0.55)
         presets.target = self
         presets.action = presetAction
-        presets.selectedSegment = presetValues.firstIndex { abs($0 - current) < 0.005 } ?? -1
+        presets.selectedSegment = scale.presetIndex(value)
         presets.frame = NSRect(x: pad, y: y, width: contentWidth, height: 18)
         addSubview(presets)
         return y + 18
@@ -759,15 +949,22 @@ final class DisplayCard: FlippedView {
     /// so a preset applied from the top of the menu is reflected in the cards below.
     func refreshFromStore() {
         let s = Store.shared[display.name]
-        brightnessSlider.doubleValue = s.brightness
-        warmthSlider.doubleValue = s.warmth
-        brightnessReadout.stringValue = percentString(s.brightness)
-        warmthReadout.stringValue = percentString(s.warmth)
-        syncPresets(brightnessPresetControl, values: brightnessPresets, to: s.brightness)
-        syncPresets(warmthPresetControl, values: warmthPresets, to: s.warmth)
+        show(brightnessScale.snap(s.brightness), brightnessScale,
+             brightnessSlider, brightnessReadout, brightnessPresetControl)
+        show(warmthScale.snap(s.kelvin), warmthScale,
+             warmthSlider, warmthReadout, warmthPresetControl)
     }
 
     // MARK: Actions
+
+    /// Puts one value on screen in all three places it appears: the slider's
+    /// position, the readout, and which preset button is lit.
+    private func show(_ value: Double, _ scale: Scale, _ slider: NSSlider,
+                      _ readout: NSTextField, _ presets: NSSegmentedControl) {
+        slider.doubleValue = value
+        readout.stringValue = scale.unit(value)
+        presets.selectedSegment = scale.presetIndex(value)
+    }
 
     private func commit(_ s: Settings) {
         Store.shared[display.name] = s
@@ -776,53 +973,42 @@ final class DisplayCard: FlippedView {
         apply(display)
     }
 
-    private func syncPresets(_ control: NSSegmentedControl, values: [Double], to value: Double) {
-        control.selectedSegment = values.firstIndex { abs($0 - value) < 0.005 } ?? -1
-    }
-
-    @objc private func brightnessChanged() {
+    /// Every brightness change funnels through here, whichever control caused it.
+    /// Values are snapped to the scale first, so what's stored is exactly what the
+    /// readout says and a preset lights up when the slider reaches it.
+    private func setBrightness(_ value: Double) {
         var s = Store.shared[display.name]
-        s.brightness = brightnessSlider.doubleValue
-        brightnessReadout.stringValue = percentString(s.brightness)
-        syncPresets(brightnessPresetControl, values: brightnessPresets, to: s.brightness)
+        s.brightness = brightnessScale.snap(value)
+        show(s.brightness, brightnessScale, brightnessSlider, brightnessReadout,
+             brightnessPresetControl)
         commit(s)
     }
 
-    @objc private func warmthChanged() {
+    private func setKelvin(_ value: Double) {
         var s = Store.shared[display.name]
-        s.warmth = warmthSlider.doubleValue
-        warmthReadout.stringValue = percentString(s.warmth)
-        syncPresets(warmthPresetControl, values: warmthPresets, to: s.warmth)
+        s.kelvin = warmthScale.snap(value)
+        show(s.kelvin, warmthScale, warmthSlider, warmthReadout, warmthPresetControl)
         commit(s)
     }
+
+    @objc private func brightnessChanged() { setBrightness(brightnessSlider.doubleValue) }
+
+    @objc private func warmthChanged() { setKelvin(warmthSlider.doubleValue) }
 
     @objc private func brightnessStepped(_ sender: NSButton) {
-        brightnessSlider.doubleValue = min(1, max(brightnessSlider.minValue,
-                                                  brightnessSlider.doubleValue + 0.05 * Double(sender.tag)))
-        brightnessChanged()
+        setBrightness(brightnessSlider.doubleValue + brightnessScale.step * Double(sender.tag))
     }
 
     @objc private func warmthStepped(_ sender: NSButton) {
-        warmthSlider.doubleValue = min(1, max(0, warmthSlider.doubleValue + 0.05 * Double(sender.tag)))
-        warmthChanged()
+        setKelvin(warmthSlider.doubleValue + warmthScale.step * Double(sender.tag))
     }
 
     @objc private func brightnessPresetPicked() {
-        let v = brightnessPresets[brightnessPresetControl.selectedSegment]
-        var s = Store.shared[display.name]
-        s.brightness = v
-        brightnessSlider.doubleValue = v
-        brightnessReadout.stringValue = percentString(v)
-        commit(s)
+        setBrightness(brightnessScale.presets[brightnessPresetControl.selectedSegment])
     }
 
     @objc private func warmthPresetPicked() {
-        let v = warmthPresets[warmthPresetControl.selectedSegment]
-        var s = Store.shared[display.name]
-        s.warmth = v
-        warmthSlider.doubleValue = v
-        warmthReadout.stringValue = percentString(v)
-        commit(s)
+        setKelvin(warmthScale.presets[warmthPresetControl.selectedSegment])
     }
 
     @objc private func resolutionPicked() {
@@ -1094,6 +1280,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         visibleCards.forEach { $0.refreshFromStore() }
     }
 
+    /// The cards belong to the menu that was just torn down, so let go of them rather
+    /// than keep pushing updates into views nobody can see.
+    func menuDidClose(_ menu: NSMenu) {
+        visibleCards.removeAll()
+    }
+
     // A disconnected display disappears from the online list, so its ID has to be
     // remembered or there would be no way to reconnect it.
     private let offKey = "disconnectedDisplays"
@@ -1114,7 +1306,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Work out which monitors can dim their own backlight. This touches the DDC
         // channel, so it happens off the main thread and only for monitors we haven't
         // already classified.
-        Capabilities.shared.probeUnknown(displays: onlineDisplays().filter(\.active)) {
+        Capabilities.shared.sync(displays: onlineDisplays().filter(\.active)) {
             applyAll()
         }
         // macOS wipes gamma on display changes and on wake, and reconfigurations also
@@ -1123,15 +1315,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // beginConfigurationFlag fires before the change lands; reapplying then
             // would just be overwritten by the change itself.
             if flags.contains(.beginConfigurationFlag) { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { resyncAndApply() }
+            Resync.schedule()
         }, nil)
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { _ in
             // Waking the Mac means someone is back at the desk; never wake to black.
             Blackout.shared.deactivate()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { resyncAndApply() }
+            // Displays come back at their own pace after a wake, so give them longer
+            // than a plain reconfiguration would get.
+            Resync.schedule(after: 2.0)
         }
+    }
+
+    /// Settings are written back lazily while sliders move; make sure the last of
+    /// them reaches disk before the app goes away.
+    func applicationWillTerminate(_ notification: Notification) {
+        Store.shared.flush()
     }
 
     /// The wave-W from the logo, drawn as a template image: crisp at any backing
@@ -1309,7 +1509,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func recheckHardware() {
         Capabilities.shared.forget()
-        Capabilities.shared.probeUnknown(displays: onlineDisplays().filter(\.active)) {
+        invalidateDisplayCaches()
+        // Clicking this closed the menu, and the cards — which say whether a monitor
+        // drives its own backlight — are rebuilt from scratch on the next open.
+        Capabilities.shared.sync(displays: onlineDisplays().filter(\.active)) {
             applyAll()
         }
     }
