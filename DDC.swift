@@ -34,7 +34,15 @@ private func checksum(_ seed: UInt8, _ data: [UInt8], _ range: Range<Int>) -> UI
 /// Sends one DDC command. `reply` is filled when a response is expected.
 private func transact(_ service: IOAVService, send: [UInt8], expectReply: Bool) -> [UInt8]? {
     var packet: [UInt8] = [UInt8(0x80 | (send.count + 1)), UInt8(send.count)] + send + [0]
-    let seed = send.count == 1 ? ddcAddress << 1 : ddcAddress << 1 ^ ddcDataAddress
+    // The checksum covers the whole frame as it appears on the wire, which includes the
+    // two address bytes the controller prepends and this buffer never sees: the 0x37
+    // chip address shifted into its write form, and the 0x51 source address.
+    //
+    // Reads used to seed with only the first of those. Monitors that don't verify the
+    // checksum on an incoming message answered anyway, so DDC looked like it worked —
+    // but a monitor that does verify stays silent, the probe reads that as "no DDC
+    // channel here", and the monitor is written off to gamma dimming for good.
+    let seed = ddcAddress << 1 ^ ddcDataAddress
     packet[packet.count - 1] = checksum(seed, packet, 0 ..< packet.count - 1)
 
     usleep(10000)

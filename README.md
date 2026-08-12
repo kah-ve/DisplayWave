@@ -235,10 +235,11 @@ in, which is exactly when this runs.
 
 A truncated walk is indistinguishable from *this monitor has no DDC channel*, so
 ignoring it costs a perfectly capable monitor its backlight control for the whole
-session. Measured on a three-monitor desk, the first walk after launch reached 72 of
-3407 entries and found nothing at all; the immediate retry completed and found all
-three. So the walk checks `IOIteratorIsValid` afterwards and repeats itself, with a
-short backoff, until one pass gets all the way through a registry that held still.
+session. In practice the first walk after launch can stop a few dozen entries into
+several thousand and find nothing at all, while an immediate retry completes and
+finds every monitor. So the walk checks `IOIteratorIsValid` afterwards and repeats
+itself, with a short backoff, until one pass gets all the way through a registry
+that held still.
 
 ### Notes
 
@@ -283,14 +284,7 @@ menu by hand. Two things that cost time to discover:
 
 `tools/` holds small diagnostic programs: `probe/` walks display ports attempting
 checksum-verified DDC reads, `modetest` lists and switches display modes,
-`gammatest` verifies the gamma APIs apply on a given machine. From the hardware this
-app was developed against, as a flavor of what DDC support looks like in the wild:
-
-| Monitor | DDC result |
-|---|---|
-| HP VH240a | Works — clean reads and writes |
-| Acer EI272UR | Dead channel; writes hang ~73s in the kernel and nothing ACKs |
-| Samsung S34J55x | Returns a fixed 64-byte block, identical every read — nothing is listening |
+`gammatest` verifies the gamma APIs apply on a given machine.
 
 If DDC hangs on a port, stop probing it. Repeated writes to a wedged channel can
 drop the display off the system until it's physically replugged.
