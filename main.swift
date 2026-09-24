@@ -412,15 +412,26 @@ func applyGamma(_ id: CGDirectDisplayID, brightness: Double, kelvin: Double, flo
                                   0, Float(b * w.b), 1.0)
 }
 
-/// Takes every display far below the normal brightness floors — for leaving screens
-/// on overnight without lighting up the room. The floors exist so a screen can't go
-/// dark enough to hide the menu; this deliberately steps past them, so it is
-/// session-only and quitting or restarting always brings the screens back.
+/// Takes every display dark without letting go of it — for leaving the Mac working
+/// overnight without lighting up the room. The picture goes to black on the GPU, and
+/// a monitor that answers DDC has its backlight zeroed and its panel switched off
+/// outright over the same channel. The displays stay awake and connected the whole
+/// time: no OS display sleep, so nothing disconnects, no windows move, and Keep Mac
+/// Awake carries on holding its assertions instead of fighting this one.
+///
+/// It used to work the other way — `pmset displaysleepnow` — but forced display
+/// sleep is a one-shot the rest of the system happily undoes, drops monitors into
+/// deep standby or off the bus entirely, and is exactly the thing keep-awake exists
+/// to prevent. Darkness that comes from the panels themselves needs none of it.
+///
+/// The normal brightness floors exist so a screen can't go dark enough to hide the
+/// menu; this deliberately steps past them, so it is session-only and quitting or
+/// restarting always brings the screens back.
 final class Blackout {
     static let shared = Blackout()
-    /// All the way off: backlight at its minimum and the image fully black. The
-    /// displays stay awake and the Mac keeps working — there is simply nothing to
-    /// see until a key or a click brings it back.
+    /// All the way off: backlight at zero and the image fully black. A monitor with
+    /// no DDC can only be blacked on the GPU, so its backlight keeps the faint glow
+    /// an LCD showing black always has — the physics of the panel, not a bug.
     static let level = 0.0
 
     /// Input within this long of switching blackout on doesn't count as the escape —
@@ -430,21 +441,18 @@ final class Blackout {
     private(set) var active = false
     private var startedAt = Date()
     private var watchdog: Timer?
-    private var lastSleepRequest = Date.distantPast
 
     func toggle() {
-        active.toggle()
-        // Keep Mac Awake normally stops the screens sleeping, which would fight this.
-        KeepAwake.shared.updateDisplayHold()
         if active {
-            watchForInput()
-            sleepDisplays()
+            deactivate()
         } else {
-            watchdog?.invalidate()
-            watchdog = nil
-            wakeDisplays()
+            active = true
+            // The screens must not sleep now: their darkness is their own, and OS
+            // display sleep would only knock the monitors off the bus.
+            KeepAwake.shared.updateDisplayHold()
+            watchForInput()
+            applyAll()
         }
-        applyAll()
     }
 
     /// Adjusting a display, applying a preset, or pressing any key means "I want to
@@ -456,31 +464,43 @@ final class Blackout {
         watchdog?.invalidate()
         watchdog = nil
         KeepAwake.shared.updateDisplayHold()
-        wakeDisplays()
+        wakePanels()
         applyAll()
     }
 
-    /// Puts the displays into standby. This is the only way to darken a monitor that
-    /// doesn't answer DDC: the backlight goes off because the monitor sleeps, not
-    /// because it was asked to dim. The displays stay connected, so nothing moves.
-    private func sleepDisplays() {
-        lastSleepRequest = Date()
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
-        task.arguments = ["displaysleepnow"]
-        try? task.run()
+    /// Switches every DDC panel back on before its brightness is restored. Monitors
+    /// without power control never went off — their gamma restore is the whole wake.
+    private func wakePanels() {
+        for d in onlineDisplays() where d.active {
+            guard Capabilities.shared.mode(for: d.name) == .hardware,
+                  let service = Capabilities.shared.service(for: d.name) else { continue }
+            Backlight.shared.setPanelPower(on: true, id: d.id, name: d.name, service: service)
+        }
     }
 
-    private func wakeDisplays() {
-        var id = IOPMAssertionID(0)
-        IOPMAssertionDeclareUserActivity("DisplayWave: leaving blackout" as CFString,
-                                         kIOPMUserActiveLocal, &id)
+    /// Quit is one of blackout's promised ways out, and macOS reverts the gamma on
+    /// its own when the process dies — but a panel switched off over DDC stays off
+    /// until someone says otherwise, so say otherwise before the process goes away.
+    /// Synchronous: the queues that normally carry DDC writes die with the app.
+    func restoreForQuit() {
+        guard active else { return }
+        active = false
+        watchdog?.invalidate()
+        watchdog = nil
+        for d in onlineDisplays() where d.active {
+            guard Capabilities.shared.mode(for: d.name) == .hardware,
+                  let service = Capabilities.shared.service(for: d.name) else { continue }
+            Backlight.shared.restoreForQuit(id: d.id, name: d.name, service: service,
+                                            brightness: Store.shared[d.name].brightness,
+                                            ceiling: Capabilities.shared.maxLuminance(for: d.name))
+        }
     }
 
     /// Watches for a keypress or a click without an event tap — asking the system
     /// how long input has been idle needs no permissions, where monitoring events
     /// does. Both count, so there are two ways back from a black screen. Mouse
-    /// *movement* is ignored on purpose: a nudged desk shouldn't light the room.
+    /// *movement* is ignored on purpose: a nudged desk shouldn't light the room —
+    /// and since the panels are off rather than asleep, it can't wake them anyway.
     private func watchForInput() {
         startedAt = Date()
         let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -491,17 +511,6 @@ final class Blackout {
                 CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseDown))
             if idle < elapsed - Self.grace {
                 self.deactivate()
-                return
-            }
-            // A nudged mouse wakes the screens without meaning to, so put them back.
-            // Recent mouse movement is the signal: CGDisplayIsAsleep keeps reporting
-            // external monitors as awake even once they're in standby, so it can't
-            // be used to tell. They come back black meanwhile, blackout being still
-            // on.
-            let moved = CGEventSource.secondsSinceLastEventType(.combinedSessionState,
-                                                                eventType: .mouseMoved)
-            if moved < 3, Date().timeIntervalSince(self.lastSleepRequest) > 5 {
-                self.sleepDisplays()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -529,12 +538,17 @@ func apply(_ display: Display) {
         ? Capabilities.shared.service(for: display.name) : nil
 
     if Blackout.shared.active {
-        // Backlight as low as it goes and gamma past its usual floor. As warm as it
-        // goes too — blue light is the part that keeps you awake.
+        // Backlight as low as it goes, gamma past its usual floor, and the panel
+        // itself switched off where the monitor allows it — in that order, on the
+        // same queue, so the panel comes back with its brightness already at the
+        // bottom. As warm as it goes too, for whatever glow remains — blue light is
+        // the part that keeps you awake.
         if let service = hardwareService {
             Backlight.shared.set(percent: Blackout.level, id: display.id, name: display.name,
                                  service: service,
                                  ceiling: Capabilities.shared.maxLuminance(for: display.name))
+            Backlight.shared.setPanelPower(on: false, id: display.id, name: display.name,
+                                           service: service)
         }
         applyGamma(display.id, brightness: Blackout.level, kelvin: warmestKelvin,
                    floor: Blackout.level)
@@ -631,8 +645,9 @@ final class KeepAwake {
     static let maxHours: Double = 24
 
     // Two separate assertions: one keeps the Mac itself running, the other keeps the
-    // screens lit. Blackout drops the second one so the displays can sleep while the
-    // machine carries on working.
+    // screens from sleeping. Blackout holds the second one too — its darkness comes
+    // from the panels themselves, and OS display sleep would drop the monitors into
+    // deep standby or disconnect them outright.
     private var systemAssertion = IOPMAssertionID(0)
     private var displayAssertion = IOPMAssertionID(0)
     private var holdingDisplay = false
@@ -679,9 +694,13 @@ final class KeepAwake {
         rearm()
     }
 
-    /// The screens are kept awake only while keep-awake is on and blackout is off.
+    /// The screens are held awake while keep-awake is on, and during blackout too:
+    /// a blacked-out display is dark by its own doing and has to stay connected,
+    /// which display sleep is not compatible with. Holding off display sleep also
+    /// keeps the Mac from idle-sleeping, which is what blackout's "the Mac keeps
+    /// working" promise rests on when keep-awake itself is off.
     func updateDisplayHold() {
-        let wanted = active && !Blackout.shared.active
+        let wanted = active || Blackout.shared.active
         guard wanted != holdingDisplay else { return }
         if wanted {
             holdingDisplay = Self.hold("PreventUserIdleDisplaySleep", &displayAssertion)
@@ -1329,8 +1348,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// Settings are written back lazily while sliders move; make sure the last of
-    /// them reaches disk before the app goes away.
+    /// them reaches disk before the app goes away. And if the app dies mid-blackout,
+    /// panels switched off over DDC have to be switched back on — gamma reverts by
+    /// itself, panel power doesn't.
     func applicationWillTerminate(_ notification: Notification) {
+        Blackout.shared.restoreForQuit()
         Store.shared.flush()
     }
 
@@ -1409,7 +1431,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         blackout.target = self
         blackout.state = Blackout.shared.active ? .on : .off
         blackout.image = NSImage(systemSymbolName: "moon.zzz.fill", accessibilityDescription: nil)
-        blackout.toolTip = "Takes every display fully dark while the Mac keeps running — for leaving it working overnight. Press any key or click to bring the screens back exactly as they were."
+        blackout.toolTip = "Takes every display dark while the Mac keeps running — for leaving it working overnight. The monitors stay connected, so windows don't move. Press any key or click to bring the screens back exactly as they were."
         menu.addItem(blackout)
         menu.addItem(.separator())
 

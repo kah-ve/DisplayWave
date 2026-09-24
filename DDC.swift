@@ -20,6 +20,15 @@ import IOKit
 private let ddcAddress: UInt8 = 0x37
 private let ddcDataAddress: UInt8 = 0x51
 let vcpLuminance: UInt8 = 0x10
+/// Power mode (DPM). Lets a monitor's panel be switched off over the wire while the
+/// video link — and the monitor's DDC controller — stay up, so macOS never notices
+/// anything happened and the same channel can switch it back on.
+let vcpPowerMode: UInt8 = 0xD6
+let powerModeOn = 1
+/// "Off" in DPM terms: panel and backlight off, controller still listening. Never
+/// send 5 (hard power-off) — many monitors only return from that via their own
+/// power button, which would strand a blacked-out screen.
+let powerModeSoftOff = 4
 
 /// How many times to re-walk the I/O registry when it changes underneath us. Enough
 /// to outlast the churn of a display being plugged in, which is the case that matters.
@@ -193,9 +202,11 @@ final class Capabilities {
     static let shared = Capabilities()
     private let key = "brightnessMode"
     private let maxKey = "brightnessMax"
+    private let powerKey = "panelPowerControl"
     private let lock = NSLock()
     private var modes: [String: BrightnessMode] = [:]
     private var maxima: [String: Int] = [:]
+    private var panelPower: [String: Bool] = [:]
     private var servicesByName: [String: IOAVService] = [:]
 
     private init() {
@@ -203,6 +214,7 @@ final class Capabilities {
             modes = raw.compactMapValues { BrightnessMode(rawValue: $0) }
         }
         maxima = (UserDefaults.standard.dictionary(forKey: maxKey) as? [String: Int]) ?? [:]
+        panelPower = (UserDefaults.standard.dictionary(forKey: powerKey) as? [String: Bool]) ?? [:]
     }
 
     func mode(for name: String) -> BrightnessMode {
@@ -213,6 +225,21 @@ final class Capabilities {
     func service(for name: String) -> IOAVService? {
         lock.lock(); defer { lock.unlock() }
         return servicesByName[name]
+    }
+
+    /// Whether this monitor honours the power-mode control (VCP D6): true, false, or
+    /// nil for never yet asked. Settled by one read the first time blackout wants it.
+    func panelPowerControl(for name: String) -> Bool? {
+        lock.lock(); defer { lock.unlock() }
+        return panelPower[name]
+    }
+
+    func setPanelPowerControl(_ supported: Bool, for name: String) {
+        lock.lock()
+        panelPower[name] = supported
+        let snapshot = panelPower
+        lock.unlock()
+        UserDefaults.standard.set(snapshot, forKey: powerKey)
     }
 
     /// The largest luminance value this monitor says it accepts. Most report 100,
@@ -315,10 +342,12 @@ final class Capabilities {
         lock.lock()
         modes = [:]
         maxima = [:]
+        panelPower = [:]
         servicesByName = [:]
         lock.unlock()
         UserDefaults.standard.removeObject(forKey: key)
         UserDefaults.standard.removeObject(forKey: maxKey)
+        UserDefaults.standard.removeObject(forKey: powerKey)
     }
 }
 
@@ -360,6 +389,59 @@ final class Backlight {
         lock.unlock()
         guard !alreadyDraining else { return }
         queue.async { self.drain(id: id, name: name, service: service) }
+    }
+
+    /// Switches the monitor's panel off or back on over DDC (VCP D6). Runs on the
+    /// display's own queue, behind any brightness write already in flight, so the
+    /// two kinds of traffic never interleave on the wire.
+    ///
+    /// The first time a monitor is asked to switch off, one read settles whether it
+    /// honours the control at all, and the verdict is cached like the DDC verdict
+    /// itself. A monitor that doesn't is simply left alone — its picture is already
+    /// black by then, its backlight already at zero.
+    func setPanelPower(on: Bool, id: CGDirectDisplayID, name: String, service: IOAVService) {
+        lock.lock()
+        let queue = queue(for: id)
+        lock.unlock()
+        queue.async {
+            var supported = Capabilities.shared.panelPowerControl(for: name)
+            if supported == nil {
+                // Nothing was ever switched off, so there is nothing to switch on.
+                guard !on else { return }
+                // This monitor already answers DDC — it's classified hardware — so
+                // one probing read here is cheap and carries none of the dead-channel
+                // risk that makes first-contact probing delicate.
+                supported = ddcRead(service, vcp: vcpPowerMode) != nil
+                Capabilities.shared.setPanelPowerControl(supported!, for: name)
+            }
+            guard supported == true else { return }
+            let value = on ? powerModeOn : powerModeSoftOff
+            if !ddcWrite(service, vcp: vcpPowerMode, value: value),
+               let fresh = Capabilities.shared.reattach(name: name, id: id) {
+                // Same stale-service story as a failed brightness write.
+                ddcWrite(fresh, vcp: vcpPowerMode, value: value)
+            }
+        }
+    }
+
+    /// Puts one panel back on and its brightness back where it belongs, and doesn't
+    /// return until that's done. The one caller is app termination, after which no
+    /// queue survives to do it asynchronously. Runs on the display's own queue all
+    /// the same, so it lands behind any write still in flight rather than
+    /// interleaving with it on the wire.
+    func restoreForQuit(id: CGDirectDisplayID, name: String, service: IOAVService,
+                        brightness: Double, ceiling: Int) {
+        lock.lock()
+        let queue = queue(for: id)
+        lock.unlock()
+        queue.sync {
+            if Capabilities.shared.panelPowerControl(for: name) == true {
+                ddcWrite(service, vcp: vcpPowerMode, value: powerModeOn)
+            }
+            let value = Swift.max(0, Swift.min(ceiling,
+                Int((max(0, min(1, brightness)) * Double(ceiling)).rounded())))
+            ddcWrite(service, vcp: vcpLuminance, value: value)
+        }
     }
 
     private func drain(id: CGDirectDisplayID, name: String, service: IOAVService) {

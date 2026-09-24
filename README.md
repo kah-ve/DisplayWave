@@ -99,13 +99,14 @@ Whichever route you take, to have it start automatically: open the menu and clic
   2000/2700/3400/4200/6500K, plus −/+ nudge buttons for fine adjustment on both.
 - **Keep Mac Awake** — caffeinate with a duration: *Always*, or a countdown you
   build with −5h / −1h / +1h / +5h, showing the time left. Deliberately
-  session-only, so a forgotten toggle can't outlive the app. It holds two separate
-  assertions — one for the Mac, one for the screens — so blackout can darken the
-  monitors while the machine keeps working.
-- **Blackout** — puts the monitors into standby so their backlights go out
-  completely, while the Mac stays awake and carries on working. This is the only way
-  to darken a monitor that doesn't answer DDC, and it needs no cooperation from the
-  monitor. Press any key or click and the screens come back exactly as they were.
+  session-only, so a forgotten toggle can't outlive the app.
+- **Blackout** — takes every monitor dark while the Mac stays awake and carries on
+  working, without putting the displays to sleep: they stay connected, so no windows
+  move and nothing disconnects, and it composes with Keep Mac Awake instead of
+  fighting it. A monitor that answers DDC has its backlight zeroed and its panel
+  switched off outright; one that doesn't gets a black picture on the GPU (an LCD's
+  faint backlight glow is the physics of the panel). Press any key or click and the
+  screens come back exactly as they were.
 - **Start at Login** — one click in the menu, no digging through System Settings.
 - Settings are remembered per monitor and reapplied automatically after sleep,
   unplugging, or display changes — which macOS would otherwise wipe.
@@ -264,16 +265,28 @@ that held still.
   deliberate exception: it goes all the way, so it has four ways out. Any keypress or
   click leaves it, waking the Mac leaves it, quitting the app leaves it, and macOS
   itself reverts the gamma if the app ever dies.
-- Blackout also sets gamma to black and the backlight to its minimum, not just
-  standby. That way a mouse nudge that wakes the screens doesn't light the room —
-  they wake up black, and are put back to sleep a moment later.
-- `CGDisplayIsAsleep` keeps reporting external monitors as awake even after they
-  enter standby, so it can't be used to tell whether they went dark. Recent mouse
-  movement is used as the signal instead.
+- Blackout never touches OS display sleep. Forced display sleep is a one-shot that
+  anything on the system can undo — a notification relights the screens and nothing
+  puts them back — it drops monitors into deep standby or off the bus entirely, and
+  it is precisely what keep-awake exists to prevent, so the two could never be on
+  together. Instead the darkness comes from the panels themselves: gamma to black on
+  the GPU, and on DDC monitors backlight to zero plus the panel switched off via the
+  DDC power control (VCP D6, the DPM soft-off — never hard-off, which some monitors
+  only leave by their own power button). The displays stay formally awake the whole
+  time — blackout holds a display-sleep assertion of its own — so they never
+  disconnect and windows never move.
+- Whether a monitor honours the power control is settled by one DDC read the first
+  time blackout is used on it, and cached like the DDC verdict itself. *Resync
+  Monitors* clears it along with everything else.
+- Quitting mid-blackout switches the panels back on before the process exits. The
+  one gap is a force-kill mid-blackout: macOS reverts the gamma, but a panel
+  switched off over DDC stays off until the monitor's own power button — or a
+  replug — wakes it.
 - Blackout detects input by asking the system how long the keyboard and mouse button
   have been idle, which needs no permissions — unlike monitoring events, which would
   demand an accessibility grant. Mouse *movement* is ignored on purpose, so a nudged
-  desk doesn't light the room.
+  desk doesn't light the room — and since the panels are off rather than asleep,
+  a nudge can't relight them anyway.
 - macOS reverts a process's gamma changes when that process exits, which is why the
   app has to keep running for its settings to hold.
 - These are private Apple APIs: not App Store distributable, and Apple can change
