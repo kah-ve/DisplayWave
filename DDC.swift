@@ -198,45 +198,52 @@ enum BrightnessMode: String {
 
 /// Remembers which monitors answer DDC. Probing is expensive and mildly risky, so a
 /// result is cached permanently and only redone when the user explicitly asks.
+///
+/// Everything here is keyed by `Display.key`, not the product name: two monitors of
+/// the same model are separate channels with separate verdicts. Verdicts stored under
+/// a bare name by older versions are deliberately not carried over to the new keys —
+/// they may have belonged to the other monitor of the pair, so each is probed afresh.
 final class Capabilities {
     static let shared = Capabilities()
-    private let key = "brightnessMode"
+    // Named so a `key` parameter can't shadow them — that once sent writes to
+    // top-level defaults named after displays.
+    private let modeKey = "brightnessMode"
     private let maxKey = "brightnessMax"
     private let powerKey = "panelPowerControl"
     private let lock = NSLock()
     private var modes: [String: BrightnessMode] = [:]
     private var maxima: [String: Int] = [:]
     private var panelPower: [String: Bool] = [:]
-    private var servicesByName: [String: IOAVService] = [:]
+    private var servicesByKey: [String: IOAVService] = [:]
 
     private init() {
-        if let raw = UserDefaults.standard.dictionary(forKey: key) as? [String: String] {
+        if let raw = UserDefaults.standard.dictionary(forKey: modeKey) as? [String: String] {
             modes = raw.compactMapValues { BrightnessMode(rawValue: $0) }
         }
         maxima = (UserDefaults.standard.dictionary(forKey: maxKey) as? [String: Int]) ?? [:]
         panelPower = (UserDefaults.standard.dictionary(forKey: powerKey) as? [String: Bool]) ?? [:]
     }
 
-    func mode(for name: String) -> BrightnessMode {
+    func mode(for key: String) -> BrightnessMode {
         lock.lock(); defer { lock.unlock() }
-        return modes[name] ?? .software
+        return modes[key] ?? .software
     }
 
-    func service(for name: String) -> IOAVService? {
+    func service(for key: String) -> IOAVService? {
         lock.lock(); defer { lock.unlock() }
-        return servicesByName[name]
+        return servicesByKey[key]
     }
 
     /// Whether this monitor honours the power-mode control (VCP D6): true, false, or
     /// nil for never yet asked. Settled by one read the first time blackout wants it.
-    func panelPowerControl(for name: String) -> Bool? {
+    func panelPowerControl(for key: String) -> Bool? {
         lock.lock(); defer { lock.unlock() }
-        return panelPower[name]
+        return panelPower[key]
     }
 
-    func setPanelPowerControl(_ supported: Bool, for name: String) {
+    func setPanelPowerControl(_ supported: Bool, for key: String) {
         lock.lock()
-        panelPower[name] = supported
+        panelPower[key] = supported
         let snapshot = panelPower
         lock.unlock()
         UserDefaults.standard.set(snapshot, forKey: powerKey)
@@ -245,27 +252,27 @@ final class Capabilities {
     /// The largest luminance value this monitor says it accepts. Most report 100,
     /// but the standard doesn't require it, and writing past a monitor's own
     /// maximum is out of spec.
-    func maxLuminance(for name: String) -> Int {
+    func maxLuminance(for key: String) -> Int {
         lock.lock(); defer { lock.unlock() }
-        let max = maxima[name] ?? 0
+        let max = maxima[key] ?? 0
         return max > 0 ? max : 100
     }
 
-    private func store(_ name: String, _ mode: BrightnessMode, _ service: IOAVService?, max: Int? = nil) {
+    private func store(_ key: String, _ mode: BrightnessMode, _ service: IOAVService?, max: Int? = nil) {
         lock.lock()
-        modes[name] = mode
-        if let service { servicesByName[name] = service }
-        if let max, max > 0 { maxima[name] = max }
+        modes[key] = mode
+        if let service { servicesByKey[key] = service }
+        if let max, max > 0 { maxima[key] = max }
         let snapshot = modes.mapValues(\.rawValue)
         let maxSnapshot = maxima
         lock.unlock()
-        UserDefaults.standard.set(snapshot, forKey: key)
+        UserDefaults.standard.set(snapshot, forKey: modeKey)
         UserDefaults.standard.set(maxSnapshot, forKey: maxKey)
     }
 
-    private func isKnown(_ name: String) -> Bool {
+    private func isKnown(_ key: String) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return modes[name] != nil
+        return modes[key] != nil
     }
 
     /// Brings the table in line with what's actually plugged in, and the only entry
@@ -282,18 +289,18 @@ final class Capabilities {
     func sync(displays: [Display], completion: @escaping () -> Void) {
         // A monitor already known not to answer is left completely alone — its
         // channel is never touched again, which is the whole point of caching.
-        let pending = displays.filter { !isKnown($0.name) || mode(for: $0.name) == .hardware }
+        let pending = displays.filter { !isKnown($0.key) || mode(for: $0.key) == .hardware }
         guard !pending.isEmpty else { DispatchQueue.main.async(execute: completion); return }
         DispatchQueue.global(qos: .utility).async {
             let registry = ddcServices()
             for display in pending {
                 let service = ddcService(for: display, in: registry)
-                if self.isKnown(display.name) {
+                if self.isKnown(display.key) {
                     // Known to answer DDC, so this is only ever a re-attach. A handle
                     // missing right now usually means the display is still settling
                     // after a reconfiguration, so the verdict is left alone and tried
                     // again next time rather than demoted to software for good.
-                    if let service { self.store(display.name, .hardware, service) }
+                    if let service { self.store(display.key, .hardware, service) }
                     continue
                 }
                 // Never seen before. No AV service at all is left unrecorded rather
@@ -303,11 +310,11 @@ final class Capabilities {
                 // filter over a list already in hand, with no DDC traffic behind it.
                 guard let service else { continue }
                 if let max = Self.probe(service) {
-                    self.store(display.name, .hardware, service, max: max)
+                    self.store(display.key, .hardware, service, max: max)
                 } else {
                     // It had a channel and didn't answer on it. That's a real verdict,
                     // paid for with a real probe, so it's recorded and never retried.
-                    self.store(display.name, .software, nil)
+                    self.store(display.key, .software, nil)
                 }
             }
             DispatchQueue.main.async(execute: completion)
@@ -329,11 +336,10 @@ final class Capabilities {
     }
 
     /// For one display, synchronously — used to retry a write that just failed.
-    func reattach(name: String, id: CGDirectDisplayID) -> IOAVService? {
-        guard mode(for: name) == .hardware else { return nil }
-        let placeholder = Display(id: id, name: name, active: true, width: 0, height: 0, refresh: 0)
-        guard let service = ddcService(for: placeholder) else { return nil }
-        store(name, .hardware, service)
+    func reattach(_ display: Display) -> IOAVService? {
+        guard mode(for: display.key) == .hardware,
+              let service = ddcService(for: display) else { return nil }
+        store(display.key, .hardware, service)
         return service
     }
 
@@ -343,9 +349,9 @@ final class Capabilities {
         modes = [:]
         maxima = [:]
         panelPower = [:]
-        servicesByName = [:]
+        servicesByKey = [:]
         lock.unlock()
-        UserDefaults.standard.removeObject(forKey: key)
+        UserDefaults.standard.removeObject(forKey: modeKey)
         UserDefaults.standard.removeObject(forKey: maxKey)
         UserDefaults.standard.removeObject(forKey: powerKey)
     }
@@ -379,7 +385,8 @@ final class Backlight {
 
     /// `ceiling` is the monitor's own reported maximum; values are scaled into its
     /// range and never sent past it.
-    func set(percent: Double, id: CGDirectDisplayID, name: String, service: IOAVService, ceiling: Int) {
+    func set(percent: Double, display: Display, service: IOAVService, ceiling: Int) {
+        let id = display.id
         let value = Swift.max(0, Swift.min(ceiling, Int((max(0, min(1, percent)) * Double(ceiling)).rounded())))
         lock.lock()
         latest[id] = value
@@ -388,7 +395,7 @@ final class Backlight {
         let queue = queue(for: id)
         lock.unlock()
         guard !alreadyDraining else { return }
-        queue.async { self.drain(id: id, name: name, service: service) }
+        queue.async { self.drain(display: display, service: service) }
     }
 
     /// Switches the monitor's panel off or back on over DDC (VCP D6). Runs on the
@@ -399,12 +406,12 @@ final class Backlight {
     /// honours the control at all, and the verdict is cached like the DDC verdict
     /// itself. A monitor that doesn't is simply left alone — its picture is already
     /// black by then, its backlight already at zero.
-    func setPanelPower(on: Bool, id: CGDirectDisplayID, name: String, service: IOAVService) {
+    func setPanelPower(on: Bool, display: Display, service: IOAVService) {
         lock.lock()
-        let queue = queue(for: id)
+        let queue = queue(for: display.id)
         lock.unlock()
         queue.async {
-            var supported = Capabilities.shared.panelPowerControl(for: name)
+            var supported = Capabilities.shared.panelPowerControl(for: display.key)
             if supported == nil {
                 // Nothing was ever switched off, so there is nothing to switch on.
                 guard !on else { return }
@@ -412,12 +419,12 @@ final class Backlight {
                 // one probing read here is cheap and carries none of the dead-channel
                 // risk that makes first-contact probing delicate.
                 supported = ddcRead(service, vcp: vcpPowerMode) != nil
-                Capabilities.shared.setPanelPowerControl(supported!, for: name)
+                Capabilities.shared.setPanelPowerControl(supported!, for: display.key)
             }
             guard supported == true else { return }
             let value = on ? powerModeOn : powerModeSoftOff
             if !ddcWrite(service, vcp: vcpPowerMode, value: value),
-               let fresh = Capabilities.shared.reattach(name: name, id: id) {
+               let fresh = Capabilities.shared.reattach(display) {
                 // Same stale-service story as a failed brightness write.
                 ddcWrite(fresh, vcp: vcpPowerMode, value: value)
             }
@@ -429,13 +436,12 @@ final class Backlight {
     /// queue survives to do it asynchronously. Runs on the display's own queue all
     /// the same, so it lands behind any write still in flight rather than
     /// interleaving with it on the wire.
-    func restoreForQuit(id: CGDirectDisplayID, name: String, service: IOAVService,
-                        brightness: Double, ceiling: Int) {
+    func restoreForQuit(display: Display, service: IOAVService, brightness: Double, ceiling: Int) {
         lock.lock()
-        let queue = queue(for: id)
+        let queue = queue(for: display.id)
         lock.unlock()
         queue.sync {
-            if Capabilities.shared.panelPowerControl(for: name) == true {
+            if Capabilities.shared.panelPowerControl(for: display.key) == true {
                 ddcWrite(service, vcp: vcpPowerMode, value: powerModeOn)
             }
             let value = Swift.max(0, Swift.min(ceiling,
@@ -444,7 +450,8 @@ final class Backlight {
         }
     }
 
-    private func drain(id: CGDirectDisplayID, name: String, service: IOAVService) {
+    private func drain(display: Display, service: IOAVService) {
+        let id = display.id
         var service = service
         var reattached = false
         while true {
@@ -460,7 +467,7 @@ final class Backlight {
                 // reconfiguration. Re-resolve it once and retry; this only runs for
                 // monitors that have already proven they answer DDC.
                 reattached = true
-                if let fresh = Capabilities.shared.reattach(name: name, id: id) {
+                if let fresh = Capabilities.shared.reattach(display) {
                     service = fresh
                     ddcWrite(service, vcp: vcpLuminance, value: value)
                 }

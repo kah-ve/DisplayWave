@@ -76,7 +76,11 @@ func migratedKelvin(_ stored: Double) -> Double {
 
 struct Display {
     let id: CGDirectDisplayID
+    /// The product name — what the monitor calls itself, and not unique: two of the
+    /// same model share it.
     let name: String
+    /// What everything about this display is stored under. See `displayIdentity`.
+    let key: String
     let active: Bool
     let width: Int
     let height: Int
@@ -148,19 +152,30 @@ struct Preset {
     static let anyDisplay = "*"
 
     var name: String
+    /// Keyed by `Display.key`.
     var settings: [String: Settings]
 
-    func settings(for displayName: String) -> Settings? {
-        settings[displayName] ?? settings[Preset.anyDisplay]
+    func settings(for key: String) -> Settings? {
+        settings[key] ?? settings[Preset.anyDisplay]
     }
 
     /// Captures what every active display is set to right now.
     static func fromCurrent(name: String) -> Preset {
         let displays = onlineDisplays().filter(\.active)
-        var settings = Dictionary(uniqueKeysWithValues: displays.map { ($0.name, Store.shared[$0.name]) })
+        // Keys can still collide — two identical monitors that report no serial — and
+        // that has to be survivable. They share one stored setting anyway.
+        var settings = Dictionary(displays.map { ($0.key, Store.shared[$0.key]) },
+                                  uniquingKeysWith: { first, _ in first })
         // Give unknown displays the first monitor's look rather than nothing.
-        if let first = displays.first { settings[anyDisplay] = Store.shared[first.name] }
+        if let first = displays.first { settings[anyDisplay] = Store.shared[first.key] }
         return Preset(name: name, settings: settings)
+    }
+
+    /// How many displays this preset names. An entry under a bare product name,
+    /// left by an older version, isn't counted again once it's been adopted.
+    var displayCount: Int {
+        let keys = settings.keys.filter { $0 != Preset.anyDisplay }
+        return keys.filter { k in !keys.contains { $0.hasPrefix(k + "#") } }.count
     }
 }
 
@@ -211,6 +226,17 @@ final class PresetStore {
         return candidate
     }
 
+    /// The preset counterpart of `Store.adopt`.
+    func adopt(_ key: String, from legacy: String) {
+        var changed = false
+        for i in presets.indices where presets[i].settings[key] == nil {
+            guard let old = presets[i].settings[legacy] else { continue }
+            presets[i].settings[key] = old
+            changed = true
+        }
+        if changed { save() }
+    }
+
     func addFromCurrent(name: String) {
         presets.append(Preset.fromCurrent(name: uniqueName(name)))
         save()
@@ -250,11 +276,11 @@ final class PresetStore {
 // Main thread only — everything that reads them builds its display list on the main
 // thread before handing work off.
 private var modeCache: [CGDirectDisplayID: [CGDisplayMode]] = [:]
-private var nameCache: [CGDirectDisplayID: String] = [:]
+private var identityCache: [CGDirectDisplayID: (name: String, key: String)] = [:]
 
 func invalidateDisplayCaches() {
     modeCache.removeAll()
-    nameCache.removeAll()
+    identityCache.removeAll()
 }
 
 /// Every mode the monitor advertises that macOS considers usable for a desktop,
@@ -312,21 +338,51 @@ func setMode(_ id: CGDirectDisplayID, _ mode: CGDisplayMode) {
 
 // MARK: - Display enumeration
 
-/// The monitor's product name, which is also the key everything is stored under.
+/// The monitor's product name, and the key its settings are stored under: the name
+/// plus the EDID serial number, so two monitors of the same model keep separate
+/// settings. Unlike the display ID, both survive reboots and replugging. A monitor
+/// that reports no serial is keyed by its bare name — two of those still share,
+/// there being nothing stable to tell them apart by.
 ///
 /// Building the CoreDisplay dictionary this reads isn't free, and `onlineDisplays()`
 /// asks for one per display every time it runs — several times over for a single
 /// menu open — so the answer is kept until the configuration changes.
-func displayName(_ id: CGDirectDisplayID) -> String {
-    if let cached = nameCache[id] { return cached }
+func displayIdentity(_ id: CGDirectDisplayID) -> (name: String, key: String) {
+    if let cached = identityCache[id] { return cached }
     var name = CGDisplayIsBuiltin(id) != 0 ? "Built-in Display" : "Display \(id)"
-    if let dict = CoreDisplay_DisplayCreateInfoDictionary(id)?.takeRetainedValue() as NSDictionary?,
-       let names = dict["DisplayProductName"] as? [String: String],
-       let product = names["en_US"] ?? names.first?.value {
-        name = product
+    var serial: Int64 = 0
+    if let dict = CoreDisplay_DisplayCreateInfoDictionary(id)?.takeRetainedValue() as NSDictionary? {
+        if let names = dict["DisplayProductName"] as? [String: String],
+           let product = names["en_US"] ?? names.first?.value {
+            name = product
+        }
+        serial = dict[kDisplaySerialNumber] as? Int64 ?? 0
     }
-    nameCache[id] = name
-    return name
+    let identity = (name: name, key: serial != 0 ? "\(name)#\(serial)" : name)
+    identityCache[id] = identity
+    return identity
+}
+
+/// The product name part of a display key.
+func displayName(key: String) -> String {
+    key.split(separator: "#", maxSplits: 1).first.map(String.init) ?? key
+}
+
+/// What each display is called on screen: its product name, unless another display
+/// has the same one. Identical monitors are told apart by where they sit in the
+/// arrangement — the thing a person can actually see — as Left/Right or Top/Bottom
+/// for a pair, and numbered left to right beyond that.
+func displayLabels(_ displays: [Display]) -> [CGDirectDisplayID: String] {
+    var labels: [CGDirectDisplayID: String] = [:]
+    for (name, group) in Dictionary(grouping: displays, by: \.name) {
+        guard group.count > 1 else { labels[group[0].id] = name; continue }
+        let ordered = group.map { (id: $0.id, at: CGDisplayBounds($0.id).origin) }
+            .sorted { $0.at.x != $1.at.x ? $0.at.x < $1.at.x : $0.at.y < $1.at.y }
+        let places = ordered.count != 2 ? ordered.indices.map { "\($0 + 1)" }
+            : ordered[0].at.x != ordered[1].at.x ? ["Left", "Right"] : ["Top", "Bottom"]
+        for (d, place) in zip(ordered, places) { labels[d.id] = "\(name) · \(place)" }
+    }
+    return labels
 }
 
 func onlineDisplays() -> [Display] {
@@ -335,8 +391,10 @@ func onlineDisplays() -> [Display] {
     guard CGGetOnlineDisplayList(16, &ids, &count) == .success else { return [] }
     return ids.prefix(Int(count)).map { id in
         let mode = CGDisplayCopyDisplayMode(id)
+        let identity = displayIdentity(id)
         return Display(id: id,
-                       name: displayName(id),
+                       name: identity.name,
+                       key: identity.key,
                        active: CGDisplayIsActive(id) != 0,
                        width: mode?.width ?? 0,
                        height: mode?.height ?? 0,
@@ -348,23 +406,31 @@ func onlineDisplays() -> [Display] {
 
 final class Store {
     static let shared = Store()
-    private let key = "displaySettings"
+    private let settingsKey = "displaySettings"
     private var cache: [String: Settings] = [:]
 
     private init() {
-        if let raw = UserDefaults.standard.dictionary(forKey: key) as? [String: [Double]] {
-            for (name, v) in raw where v.count == 2 {
-                cache[name] = Settings(brightness: v[0], kelvin: migratedKelvin(v[1]))
+        if let raw = UserDefaults.standard.dictionary(forKey: settingsKey) as? [String: [Double]] {
+            for (key, v) in raw where v.count == 2 {
+                cache[key] = Settings(brightness: v[0], kelvin: migratedKelvin(v[1]))
             }
         }
     }
 
-    subscript(name: String) -> Settings {
-        get { cache[name] ?? Settings() }
+    subscript(key: String) -> Settings {
+        get { cache[key] ?? Settings() }
         set {
-            cache[name] = newValue
+            cache[key] = newValue
             scheduleFlush()
         }
+    }
+
+    /// Starts a display off from what was saved under its bare product name, if it
+    /// has nothing of its own yet. The old entry is kept, so an identical monitor
+    /// that turns up later starts from it too.
+    func adopt(_ key: String, from legacy: String) {
+        guard cache[key] == nil, let old = cache[legacy] else { return }
+        self[key] = old
     }
 
     // A slider drag lands dozens of changes a second, and each one used to rebuild
@@ -386,14 +452,14 @@ final class Store {
     func flush() {
         pendingFlush?.cancel()
         pendingFlush = nil
-        UserDefaults.standard.set(cache.mapValues { [$0.brightness, $0.kelvin] }, forKey: key)
+        UserDefaults.standard.set(cache.mapValues { [$0.brightness, $0.kelvin] }, forKey: settingsKey)
     }
 
     func reset() {
         pendingFlush?.cancel()
         pendingFlush = nil
         cache = [:]
-        UserDefaults.standard.removeObject(forKey: key)
+        UserDefaults.standard.removeObject(forKey: settingsKey)
     }
 }
 
@@ -472,9 +538,9 @@ final class Blackout {
     /// without power control never went off — their gamma restore is the whole wake.
     private func wakePanels() {
         for d in onlineDisplays() where d.active {
-            guard Capabilities.shared.mode(for: d.name) == .hardware,
-                  let service = Capabilities.shared.service(for: d.name) else { continue }
-            Backlight.shared.setPanelPower(on: true, id: d.id, name: d.name, service: service)
+            guard Capabilities.shared.mode(for: d.key) == .hardware,
+                  let service = Capabilities.shared.service(for: d.key) else { continue }
+            Backlight.shared.setPanelPower(on: true, display: d, service: service)
         }
     }
 
@@ -488,11 +554,11 @@ final class Blackout {
         watchdog?.invalidate()
         watchdog = nil
         for d in onlineDisplays() where d.active {
-            guard Capabilities.shared.mode(for: d.name) == .hardware,
-                  let service = Capabilities.shared.service(for: d.name) else { continue }
-            Backlight.shared.restoreForQuit(id: d.id, name: d.name, service: service,
-                                            brightness: Store.shared[d.name].brightness,
-                                            ceiling: Capabilities.shared.maxLuminance(for: d.name))
+            guard Capabilities.shared.mode(for: d.key) == .hardware,
+                  let service = Capabilities.shared.service(for: d.key) else { continue }
+            Backlight.shared.restoreForQuit(display: d, service: service,
+                                            brightness: Store.shared[d.key].brightness,
+                                            ceiling: Capabilities.shared.maxLuminance(for: d.key))
         }
     }
 
@@ -533,9 +599,10 @@ let deepDimFloor = 0.35
 /// `backlightFloor` they do stack deliberately: the backlight keeps going down and
 /// gamma joins in, which is the only way to reach the very dark end.
 func apply(_ display: Display) {
-    let s = Store.shared[display.name]
-    let hardwareService = Capabilities.shared.mode(for: display.name) == .hardware
-        ? Capabilities.shared.service(for: display.name) : nil
+    let s = Store.shared[display.key]
+    let hardwareService = Capabilities.shared.mode(for: display.key) == .hardware
+        ? Capabilities.shared.service(for: display.key) : nil
+    let ceiling = Capabilities.shared.maxLuminance(for: display.key)
 
     if Blackout.shared.active {
         // Backlight as low as it goes, gamma past its usual floor, and the panel
@@ -544,22 +611,18 @@ func apply(_ display: Display) {
         // bottom. As warm as it goes too, for whatever glow remains — blue light is
         // the part that keeps you awake.
         if let service = hardwareService {
-            Backlight.shared.set(percent: Blackout.level, id: display.id, name: display.name,
-                                 service: service,
-                                 ceiling: Capabilities.shared.maxLuminance(for: display.name))
-            Backlight.shared.setPanelPower(on: false, id: display.id, name: display.name,
-                                           service: service)
+            Backlight.shared.set(percent: Blackout.level, display: display, service: service,
+                                 ceiling: ceiling)
+            Backlight.shared.setPanelPower(on: false, display: display, service: service)
         }
         applyGamma(display.id, brightness: Blackout.level, kelvin: warmestKelvin,
                    floor: Blackout.level)
         return
     }
 
-    if Capabilities.shared.mode(for: display.name) == .hardware,
-       let service = Capabilities.shared.service(for: display.name) {
-        Backlight.shared.set(percent: s.brightness, id: display.id, name: display.name,
-                             service: service,
-                             ceiling: Capabilities.shared.maxLuminance(for: display.name))
+    if let service = hardwareService {
+        Backlight.shared.set(percent: s.brightness, display: display, service: service,
+                             ceiling: ceiling)
         let gamma = s.brightness < backlightFloor
             ? max(deepDimFloor, s.brightness / backlightFloor) : 1.0
         applyGamma(display.id, brightness: gamma, kelvin: s.kelvin)
@@ -577,11 +640,22 @@ func applyAll() {
 func applyPreset(_ preset: Preset) {
     Blackout.shared.deactivate()
     for display in onlineDisplays() where display.active {
-        guard let settings = preset.settings(for: display.name) else { continue }
-        Store.shared[display.name] = settings
+        guard let settings = preset.settings(for: display.key) else { continue }
+        Store.shared[display.key] = settings
         apply(display)
     }
     AppDelegate.shared?.refreshVisibleCards()
+}
+
+/// Settings used to be stored under the product name alone, which identical monitors
+/// share. A display seen under its own key for the first time starts from whatever
+/// was saved under its name. Done per display as each one appears, rather than once
+/// at upgrade, so a monitor that wasn't connected then still keeps its settings.
+func adoptLegacySettings(_ displays: [Display]) {
+    for d in displays where d.key != d.name {
+        Store.shared.adopt(d.key, from: d.name)
+        PresetStore.shared.adopt(d.key, from: d.name)
+    }
 }
 
 /// Brings everything back in line after a display reconfiguration: drops the caches
@@ -589,6 +663,7 @@ func applyPreset(_ preset: Preset) {
 /// dead), probes anything newly plugged in, then reapplies every setting.
 func resyncAndApply() {
     invalidateDisplayCaches()
+    adoptLegacySettings(onlineDisplays())
     Capabilities.shared.sync(displays: onlineDisplays().filter(\.active)) {
         applyAll()
     }
@@ -785,14 +860,15 @@ final class DisplayCard: FlippedView {
     private let brightnessPresetControl: NSSegmentedControl
     private let warmthPresetControl: NSSegmentedControl
 
-    init(display: Display, menu: NSMenu?, canPowerOff: Bool) {
+    /// `title` is what the card is headed with — see `displayLabels`.
+    init(display: Display, title: String, menu: NSMenu?, canPowerOff: Bool) {
         self.display = display
         self.allModes = displayModes(display.id)
         self.hostMenu = menu
-        let hardware = Capabilities.shared.mode(for: display.name) == .hardware
+        let hardware = Capabilities.shared.mode(for: display.key) == .hardware
         let brightnessScale = Scale.brightness(hardware: hardware)
         self.brightnessScale = brightnessScale
-        let s = Store.shared[display.name]
+        let s = Store.shared[display.key]
         brightnessReadout = label(brightnessScale.describe(s.brightness), size: 11,
                                   color: .secondaryLabelColor, align: .right)
         warmthReadout = label(Scale.warmth.describe(s.kelvin), size: 11,
@@ -812,7 +888,7 @@ final class DisplayCard: FlippedView {
         glyph.contentTintColor = .labelColor
         addSubview(glyph)
 
-        let name = label(display.name, size: 13, weight: .semibold)
+        let name = label(title, size: 13, weight: .semibold)
         name.frame = NSRect(x: pad + 22, y: y, width: contentWidth - 50, height: 17)
         addSubview(name)
 
@@ -822,7 +898,7 @@ final class DisplayCard: FlippedView {
         power.isBordered = false
         power.contentTintColor = canPowerOff ? .secondaryLabelColor : .tertiaryLabelColor
         power.isEnabled = canPowerOff
-        power.toolTip = canPowerOff ? "Turn \(display.name) off" : "Can't turn off the last active display"
+        power.toolTip = canPowerOff ? "Turn \(title) off" : "Can't turn off the last active display"
         power.target = self
         power.action = #selector(togglePower)
         power.frame = NSRect(x: Self.width - pad - 20, y: y - 1, width: 20, height: 20)
@@ -967,7 +1043,7 @@ final class DisplayCard: FlippedView {
     /// Pulls slider positions, readouts and preset highlighting back from the store,
     /// so a preset applied from the top of the menu is reflected in the cards below.
     func refreshFromStore() {
-        let s = Store.shared[display.name]
+        let s = Store.shared[display.key]
         show(brightnessScale.snap(s.brightness), brightnessScale,
              brightnessSlider, brightnessReadout, brightnessPresetControl)
         show(warmthScale.snap(s.kelvin), warmthScale,
@@ -986,7 +1062,7 @@ final class DisplayCard: FlippedView {
     }
 
     private func commit(_ s: Settings) {
-        Store.shared[display.name] = s
+        Store.shared[display.key] = s
         // Touching a slider means the screens are wanted back.
         Blackout.shared.deactivate()
         apply(display)
@@ -996,7 +1072,7 @@ final class DisplayCard: FlippedView {
     /// Values are snapped to the scale first, so what's stored is exactly what the
     /// readout says and a preset lights up when the slider reaches it.
     private func setBrightness(_ value: Double) {
-        var s = Store.shared[display.name]
+        var s = Store.shared[display.key]
         s.brightness = brightnessScale.snap(value)
         show(s.brightness, brightnessScale, brightnessSlider, brightnessReadout,
              brightnessPresetControl)
@@ -1004,7 +1080,7 @@ final class DisplayCard: FlippedView {
     }
 
     private func setKelvin(_ value: Double) {
-        var s = Store.shared[display.name]
+        var s = Store.shared[display.key]
         s.kelvin = warmthScale.snap(value)
         show(s.kelvin, warmthScale, warmthSlider, warmthReadout, warmthPresetControl)
         commit(s)
@@ -1050,7 +1126,7 @@ final class DisplayCard: FlippedView {
 
     @objc private func togglePower() {
         hostMenu?.cancelTracking()
-        AppDelegate.shared?.setPower(id: display.id, name: display.name, on: false)
+        AppDelegate.shared?.setPower(id: display.id, key: display.key, on: false)
     }
 }
 
@@ -1251,7 +1327,7 @@ final class PresetEditorView: FlippedView, NSTextFieldDelegate {
     /// "All displays" for a preset that applies everywhere, otherwise how many
     /// monitors it remembers.
     private func describe(_ preset: Preset) -> String {
-        let named = preset.settings.keys.filter { $0 != Preset.anyDisplay }.count
+        let named = preset.displayCount
         if named == 0 { return "All displays" }
         return named == 1 ? "1 display" : "\(named) displays"
     }
@@ -1306,7 +1382,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     // A disconnected display disappears from the online list, so its ID has to be
-    // remembered or there would be no way to reconnect it.
+    // remembered or there would be no way to reconnect it. Keyed by display key;
+    // older versions keyed it by name, which reads back the same way.
     private let offKey = "disconnectedDisplays"
     private var offDisplays: [String: CGDirectDisplayID] {
         get { (UserDefaults.standard.dictionary(forKey: offKey) as? [String: UInt32]) ?? [:] }
@@ -1321,6 +1398,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
+        adoptLegacySettings(onlineDisplays())
         applyAll()
         // Work out which monitors can dim their own backlight. This touches the DDC
         // channel, so it happens off the main thread and only for monitors we haven't
@@ -1395,8 +1473,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         visibleCards.removeAll()
+        let labels = displayLabels(online.filter(\.active))
         for d in online where d.active {
-            let card = DisplayCard(display: d, menu: menu, canPowerOff: activeCount > 1)
+            let card = DisplayCard(display: d, title: labels[d.id] ?? d.name, menu: menu,
+                                   canPowerOff: activeCount > 1)
             visibleCards.append(card)
             let item = NSMenuItem()
             item.view = card
@@ -1412,7 +1492,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let header = NSMenuItem(title: "Turned off", action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
-            for (name, id) in stillOff.sorted(by: { $0.key < $1.key }) {
+            let offNames = stillOff.keys.map { displayName(key: $0) }
+            for (key, id) in stillOff.sorted(by: { $0.key < $1.key }) {
+                // Where a display sits means nothing once it's off, so identical ones
+                // are told apart by serial number instead.
+                var name = displayName(key: key)
+                if key != name, offNames.filter({ $0 == name }).count > 1 {
+                    name += " · S/N \(key.dropFirst(name.count + 1))"
+                }
                 let item = NSMenuItem(title: "  \(name)", action: #selector(turnOn(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = id
@@ -1466,13 +1553,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: Power
 
-    func setPower(id: CGDirectDisplayID, name: String, on: Bool) {
+    /// `key` is only needed to turn a display off; one being turned back on is found
+    /// by its ID.
+    func setPower(id: CGDirectDisplayID, key: String? = nil, on: Bool) {
         guard setDisplay(id, enabled: on) else {
             NSSound.beep()
             return
         }
         var off = offDisplays
-        if on { off.removeValue(forKey: name) } else { off[name] = id }
+        if on { off = off.filter { $0.value != id } } else if let key { off[key] = id }
         offDisplays = off
         if on {
             // The display needs a moment to come back before gamma will stick.
@@ -1482,7 +1571,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func turnOn(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? CGDirectDisplayID else { return }
-        setPower(id: id, name: sender.title.trimmingCharacters(in: .whitespaces), on: true)
+        setPower(id: id, on: true)
     }
 
     @objc private func resetAll() {
@@ -1551,9 +1640,12 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
     init(path: String) { self.path = path }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let active = onlineDisplays().filter(\.active)
+        adoptLegacySettings(active)
+        let labels = displayLabels(active)
         let rows: [NSView] = [PresetRow(frame: .zero)]
-            + onlineDisplays().filter(\.active)
-            .map { DisplayCard(display: $0, menu: nil, canPowerOff: true) }
+            + active.map { DisplayCard(display: $0, title: labels[$0.id] ?? $0.name,
+                                       menu: nil, canPowerOff: true) }
             + [KeepAwakeRow(frame: .zero)]
         let height = rows.reduce(0) { $0 + $1.frame.height + 1 }
 
