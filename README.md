@@ -4,6 +4,8 @@
 
 # DisplayWave
 
+> If you like this, check out [Warpbin](https://warpbin.com/?ref=github-displaywave), a shared photo gallery for events that I'm also building.
+
 A minimal, free, open-source menu bar app for controlling external monitors on macOS —
 power, brightness, color temperature, resolution and refresh rate, all from one
 clean menu.
@@ -93,8 +95,11 @@ Whichever route you take, to have it start automatically: open the menu and clic
   preset remembers brightness and color temperature *per monitor*, so one click puts
   the whole desk back the way you had it. Add, rename and delete them in
   *Edit Presets…*.
-- **Resolution & refresh rate** — the mode line on each card is two dropdowns.
-  Switching prefers HiDPI variants and keeps your refresh rate where possible.
+- **Resolution & refresh rate** — a submenu under each card. Switching prefers
+  HiDPI variants and keeps your refresh rate where possible.
+- **Layouts** — save where each monitor sits, which one is the main display, and
+  the resolution and refresh rate each runs at, then put the whole desk back in one
+  click. Separate from presets, which are about how the picture looks.
 - **Quick values and nudge buttons** — one-click 35/50/75/100% brightness and
   2000/2700/3400/4200/6500K, plus −/+ nudge buttons for fine adjustment on both.
 - **Keep Mac Awake** — caffeinate with a duration: *Always*, or a countdown you
@@ -154,8 +159,16 @@ Presets sit at the top of the menu. Three come built in, applying to every displ
 A preset only touches monitors it knows about, plus a fallback for any monitor it
 has never seen — so plugging in a new display doesn't leave it out.
 
-*Arrange Displays…* jumps to macOS's own display settings — arrangement is one thing
-the system already does well, so the app links to it instead of rebuilding it.
+## Layouts
+
+Arrange your displays in macOS's own settings (*Arrange Displays…* jumps there), then
+click **Save Current Arrangement** in the *Layouts* row. A layout remembers, per
+monitor, its position, which display is main, and its resolution and refresh rate.
+Click it later and every monitor it knows moves back in one go, the way System
+Settings applies a change. Monitors it doesn't know are left where they are.
+
+**Edit Layouts…** renames, re-saves and deletes them, just like presets. Layouts
+don't turn monitors on or off.
 
 ## How it works, and why
 
@@ -237,6 +250,15 @@ Use **Resync Monitors** after changing a cable or enabling DDC/CI in a monitor's
 on-screen menu — that's the one case that needs a fresh probe rather than a fresh
 handle.
 
+DisplayWave also resyncs on its own after every display change, after the Mac or
+just its screens wake, on returning to your session, and after Blackout ends. What
+it does is logged; if something goes wrong, run this right afterwards and include
+the output in an issue:
+
+```bash
+/usr/bin/log show --last 30m --info --predicate 'subsystem == "local.wave.displaywave"'
+```
+
 #### The registry walk has to be retried
 
 Finding a monitor's DDC channel means walking the I/O registry, and IOKit invalidates
@@ -306,9 +328,19 @@ menu by hand. Two things that cost time to discover:
 - Run the executable **inside the bundle**, not the bare binary — run bare, it gets
   a different preferences domain and shows defaults instead of your real settings.
 
-`tools/` holds small diagnostic programs: `probe/` walks display ports attempting
-checksum-verified DDC reads, `modetest` lists and switches display modes,
-`gammatest` verifies the gamma APIs apply on a given machine.
+`tools/` holds small diagnostic programs: `enum` lists the online displays, `probe/`
+walks display ports attempting checksum-verified DDC reads, `modetest` lists and
+switches display modes, `gammatest` verifies the gamma APIs apply on a given
+machine, and `awaketest` exercises the keep-awake assertions. Build them from the
+repo root:
+
+```bash
+swiftc -import-objc-header tools/cd.h tools/enum.swift -o tools/enumdisp -framework CoreDisplay
+swiftc -import-objc-header tools/cd.h tools/modetest.swift -o tools/modetest -framework CoreDisplay
+swiftc -import-objc-header tools/cd.h tools/gammatest.swift -o tools/gammatest -framework CoreDisplay
+swiftc -import-objc-header tools/probe/ioav.h tools/probe/probe.swift -o tools/probe/probe -framework IOKit
+swiftc tools/awaketest.swift -o tools/awaketest   # quit DisplayWave first, or its Keep Awake skews the result
+```
 
 If DDC hangs on a port, stop probing it. Repeated writes to a wedged channel can
 drop the display off the system until it's physically replugged.
