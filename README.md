@@ -4,14 +4,11 @@
 
 # DisplayWave
 
+A small, free, open-source menu bar app for external monitors on macOS: turn them
+off and on, set brightness and color temperature, switch resolution and refresh
+rate, and save it all as presets and layouts.
+
 > If you like this, check out [Warpbin](https://warpbin.com/?ref=github-displaywave), a shared photo gallery for events that I'm also building.
-
-A minimal, free, open-source menu bar app for controlling external monitors on macOS —
-power, brightness, color temperature, resolution and refresh rate, all from one
-clean menu.
-
-It exists because the other options are either paywalled and too complicated with features
-or they don't handle it all in one app. DisplayWave is free and open source. Enjoy!
 
 <p align="center">
   <img src="assets/menu.png" width="340" alt="The DisplayWave menu: presets and layouts at the top, a card per monitor with brightness and color temperature controls and its display mode, turned-off displays, Keep Mac Awake, Blackout, and utility items">
@@ -19,342 +16,218 @@ or they don't handle it all in one app. DisplayWave is free and open source. Enj
 
 ## Install
 
-Requires macOS 13 or later. Hardware backlight control uses the Apple Silicon
-display driver; everything else also works on Intel, where brightness falls back to
-GPU dimming.
+Needs a Mac with Apple Silicon and macOS 13 or later.
 
-### Option 1 — hand it to Claude
+### Download
 
-The easiest route, and it sidesteps the Gatekeeper warning entirely. Paste this into
-[Claude Code](https://claude.com/claude-code) and it does the whole thing:
-
-> Clone https://github.com/kah-ve/DisplayWave and set it up on my Mac: build it with
-> ./build.sh, move DisplayWave.app into /Applications, and launch it. Install the
-> Xcode command line tools first if they're missing. Remind me to click "Start at
-> Login" in its menu so it starts automatically. Then tell me which of my monitors
-> support hardware backlight control and which will use software dimming, and what
-> the difference means.
-
-An app you build on your own machine is never marked as quarantined, so there is
-nothing to unblock — no `xattr`, no Gatekeeper dialog.
-
-### Option 2 — download the release
-
-1. Download the zip from [Releases](https://github.com/kah-ve/DisplayWave/releases)
+1. Download the latest zip from [Releases](https://github.com/kah-ve/DisplayWave/releases)
    and double-click it to unzip.
-2. Drag `DisplayWave.app` into your **Applications** folder.
-3. **Remove the quarantine flag.** This step is required. Open Terminal and run:
+2. Drag **DisplayWave.app** into your **Applications** folder.
+3. Open **Terminal** and run:
 
    ```bash
    xattr -cr /Applications/DisplayWave.app
    ```
 
-4. Open the app. A wave icon appears in the menu bar — there's no Dock icon and no
-   window.
+4. Open DisplayWave. A wave icon appears in the menu bar (there's no Dock icon or window).
+5. Optional: click **Start at Login** in its menu.
 
-Step 3 isn't optional and it isn't a nag you can click through. macOS quarantines
-everything downloaded from the internet, and only releases apps notarized by Apple
-— which needs a paid Apple Developer account this project doesn't have. Until the
-flag is cleared the app refuses to open, usually with *"Apple could not verify
-DisplayWave is free of malware"*. Run the command any time, before or after you
-first try to open it; it fixes both cases.
+**Why step 3?** The app isn't notarized by Apple (that needs a paid developer
+account), so macOS blocks it with *"Apple could not verify DisplayWave is free of
+malware"* until the download's quarantine flag is cleared. It's safe to run before
+or after that warning appears.
 
-**If you'd rather not use Terminal:** try to open the app once and let it be
-blocked, then go to **System Settings → Privacy & Security**, scroll to
-**Security**, and click **Open Anyway** next to the message about DisplayWave. The
-button only appears after a blocked attempt. Note that the old Control-click → Open
-trick no longer works — Apple removed it in macOS 15 Sequoia.
+Rather not use Terminal? Try to open the app once, then go to **System Settings →
+Privacy & Security** and click **Open Anyway** next to the DisplayWave message.
 
-### Option 3 — build from source
+### Build from source
+
+Building it yourself skips the quarantine step entirely. Needs the Xcode command
+line tools (`xcode-select --install`).
 
 ```bash
 git clone https://github.com/kah-ve/DisplayWave.git
 cd DisplayWave
 ./build.sh
-open DisplayWave.app
+mv DisplayWave.app /Applications/
+open /Applications/DisplayWave.app
 ```
 
-Needs the Xcode command line tools (`xcode-select --install`). As with Option 1,
-nothing is quarantined, so there's no `xattr` step.
+<details>
+<summary>Or have an AI coding agent do it</summary>
 
-Whichever route you take, to have it start automatically: open the menu and click
-**Start at Login**.
+Paste this into an agent like [Claude Code](https://claude.com/claude-code):
+
+> Clone https://github.com/kah-ve/DisplayWave and set it up on my Mac: build it with
+> ./build.sh, move DisplayWave.app into /Applications, and launch it. Install the
+> Xcode command line tools first if they're missing. Remind me to click "Start at
+> Login" in its menu. Then tell me which of my monitors support hardware backlight
+> control and which will use software dimming.
+
+</details>
 
 ## Features
 
-- **Turn monitors off and on** — a true disconnect, not just a black screen. The
-  monitor loses signal and drops into standby. Works on *every* monitor, because the
-  monitor gets no say. Turned-off displays wait in their own menu section.
-- **Brightness** — on monitors that support DDC this drives the actual backlight,
-  exactly like the monitor's own buttons. On monitors that don't, it dims the image
-  on the GPU instead, and the label says so (*Brightness · software*). At the bottom
-  of the range both are used together, so a DDC monitor can still get properly dark
-  even when its own backlight bottoms out too bright.
-- **Color temperature** — shifts the white point warmer for evenings, like Night
-  Shift but per monitor, and shown in kelvin rather than a meaningless percentage.
-  6500K is your monitor's own white and leaves it untouched; 2000K is candlelight.
-- **Presets** — Day / Evening / Night to start with, and you can save your own. A
-  preset remembers brightness and color temperature *per monitor*, so one click puts
-  the whole desk back the way you had it. Add, rename and delete them in
-  *Edit Presets…*.
-- **Resolution & refresh rate** — a submenu under each card. Switching prefers
-  HiDPI variants and keeps your refresh rate where possible.
-- **Layouts** — save where each monitor sits, which one is the main display, and
-  the resolution and refresh rate each runs at, then put the whole desk back in one
-  click. Separate from presets, which are about how the picture looks.
-- **Quick values and nudge buttons** — one-click 35/50/75/100% brightness and
-  2000/2700/3400/4200/6500K, plus −/+ nudge buttons for fine adjustment on both.
-- **Keep Mac Awake** — caffeinate with a duration: *Always*, or a countdown you
-  build with −5h / −1h / +1h / +5h, showing the time left. Deliberately
-  session-only, so a forgotten toggle can't outlive the app.
-- **Blackout** — takes every monitor dark while the Mac stays awake and carries on
-  working, without putting the displays to sleep: they stay connected, so no windows
-  move and nothing disconnects, and it composes with Keep Mac Awake instead of
-  fighting it. A monitor that answers DDC has its backlight zeroed and its panel
-  switched off outright; one that doesn't gets a black picture on the GPU (an LCD's
-  faint backlight glow is the physics of the panel). Press any key or click and the
-  screens come back exactly as they were.
-- **Start at Login** — one click in the menu, no digging through System Settings.
+- **Turn monitors off and on.** A real disconnect: the monitor loses signal and goes
+  to standby. Works on every monitor.
+- **Brightness.** Drives the monitor's actual backlight over DDC where the monitor
+  supports it, and dims the image on the GPU where it doesn't (the label then reads
+  *Brightness · software*). At the bottom of the range both work together, so a
+  monitor can go darker than its own minimum.
+- **Color temperature** in kelvin, per monitor. 6500K leaves the picture untouched;
+  2000K is candlelight.
+- **Quick values and nudges** for both: 35–100% and 2000–6500K in one click, plus
+  −/+ buttons.
+- **Resolution and refresh rate** from a submenu under each monitor.
+- **Presets** save brightness and color temperature for every monitor at once.
+- **Layouts** save where each monitor sits, which one is main, and its resolution
+  and refresh rate.
+- **Keep Mac Awake**, for a set number of hours or until you turn it off.
+- **Blackout** turns every screen dark while the Mac keeps running, without sleeping
+  the displays, so nothing disconnects and no windows move. Any key or click brings
+  them back.
+- **Start at Login**, from the menu.
 - Settings are remembered per monitor and reapplied automatically after sleep,
-  unplugging, or display changes — which macOS would otherwise wipe.
-- No dock icon, no background services, no accounts, no payments. One menu.
+  replugging, and display changes.
 
-## Alternatives
-
-DisplayWave exists because none of these covered the same combination: power +
-brightness + color temperature, per monitor, working even on DDC-less monitors,
-minimal, free.
-
-| App | What it's great at | Where DisplayWave differs |
-|---|---|---|
-| [MonitorControl](https://github.com/MonitorControl/MonitorControl) | Free, open source, DDC brightness/volume from your keyboard keys | DDC-only — on a monitor that doesn't answer DDC it can do nothing. No power off/on, no color temperature. |
-| [BetterDisplay](https://github.com/waydabber/BetterDisplay) | The power tool: virtual displays, EDID overrides, PIP, everything | Monitor disconnect — the feature this app was born for — sits in the paid Pro tier, inside a very large feature surface. |
-| [Lunar](https://lunar.fyi) | Adaptive brightness synced to ambient light or the built-in display | The adaptive features are paid, and hardware control is DDC-centric. |
-| f.lux / Night Shift | Automatic time-of-day color temperature | Applies to all displays equally; no per-monitor control, no brightness or power. |
-| [DisplayBuddy](https://displaybuddy.app) | Polished presets across many monitors | Paid, and hardware control is DDC-centric with the same gamma fallback this app uses — just not free. |
-| Amphetamine / `caffeinate` | Keep-awake with schedules and app triggers | DisplayWave has a keep-awake with a simple duration, sitting next to the monitor controls where you already are. |
-
-If you want keyboard-key brightness on DDC monitors, use MonitorControl. If you
-want virtual displays or EDID overrides, buy BetterDisplay. If you want a small
-free menu that turns monitors off and dims and warms them regardless of DDC
-support, use this.
+No Dock icon, no background services, no account.
 
 ## Presets
 
-Presets sit at the top of the menu. Three come built in, applying to every display:
+Presets sit at the top of the menu. Three come built in and apply to every display:
 
 | Preset | Brightness | Color temperature |
 |---|---|---|
-| Day | 100% | 6500K — daylight, no shift |
-| Evening | 70% | 4200K — warm white |
-| Night | 35% | 2700K — incandescent |
+| Day | 100% | 6500K (no shift) |
+| Evening | 70% | 4200K (warm white) |
+| Night | 35% | 2700K (incandescent) |
 
-**Edit Presets…** is where you make them yours:
+Set your monitors up how you like, then use **Edit Presets…** to save it as a new
+preset or overwrite an existing one. A preset records each monitor separately, and
+gives monitors it has never seen the look of the first one it saved.
 
 <p align="center">
   <img src="assets/presets.png" width="414" alt="The Presets window: each preset's name, how many displays it covers, a Save button and a delete button, with New from Current Settings and Restore Defaults below">
 </p>
 
-- **New from Current Settings** — set your monitors up how you like, then save that
-  arrangement as a preset. It records each monitor separately, so a preset can leave
-  one screen bright and another dim.
-- **Save** on an existing preset overwrites it with the current look.
-- Click a name to rename it; **✕** deletes it. **Restore Defaults** brings back the
-  original three.
-
-A preset only touches monitors it knows about, plus a fallback for any monitor it
-has never seen — so plugging in a new display doesn't leave it out.
-
 ## Layouts
 
-Arrange your displays in macOS's own settings (*Arrange Displays…* jumps there), then
-click **Save Current Arrangement** in the *Layouts* row. A layout remembers, per
-monitor, its position, which display is main, and its resolution and refresh rate.
-Click it later and every monitor it knows moves back in one go, the way System
-Settings applies a change. Monitors it doesn't know are left where they are.
+Arrange your displays in macOS's settings (**Arrange Displays…** opens them), then
+click **Save Current Arrangement** in the menu's *Layouts* row. Clicking a layout
+later moves every monitor it knows back into place and restores its resolution and
+refresh rate, in one step. Monitors it doesn't know are left alone, and layouts
+never turn monitors on or off. **Edit Layouts…** renames, re-saves and deletes them.
 
 <p align="center">
   <img src="assets/layouts.png" width="414" alt="The Layouts window: each layout's name, how many displays it covers, a Save button and a delete button, with New from Current Arrangement below">
 </p>
 
-**Edit Layouts…** renames, re-saves and deletes them, just like presets. Layouts
-don't turn monitors on or off.
+## Troubleshooting
 
-## How it works, and why
+- **A monitor says *Brightness · software*.** It isn't answering DDC. Turn on DDC/CI
+  in the monitor's own on-screen menu, or try another cable or port: many docks,
+  adapters and some Macs' built-in HDMI ports don't pass DDC through. Then click
+  **Resync Monitors**.
+- **Something looks wrong after sleep or replugging.** DisplayWave resyncs on its own
+  after display changes, sleep and wake, and switching users, but **Resync Monitors**
+  forces a full re-check.
+- **Reporting a problem.** Run this right after it happens and include the output in
+  an issue:
 
-There are two ways to control a monitor, and they are not equivalent.
+  ```bash
+  /usr/bin/log show --last 30m --info --predicate 'subsystem == "local.wave.displaywave"'
+  ```
 
-**DDC/CI** sends commands down the video cable asking the monitor to change its own
-settings. It gives true hardware control — real backlight dimming — but only if the
-monitor implements it and the cable/adapter passes the signal through. When that
-fails, it fails completely and no software can fix it.
+- **Dimming and warmth disappear when the app quits.** That's macOS: it undoes an
+  app's gamma changes when the app exits, so DisplayWave has to keep running. (A DDC
+  monitor keeps its backlight level.)
+- **A display didn't come back.** Turned-off displays are listed under *Turned off*
+  in the menu. A restart always brings every display back.
 
-**OS-level control** never talks to the monitor. It changes what the Mac does:
+## Alternatives
 
-- `CGSConfigureDisplayEnabled` (private CoreGraphics SPI) tells macOS to stop
-  driving a display; the monitor loses signal and enters standby by itself. This is
-  why power off/on works on every monitor.
-- `CGSetDisplayTransferByFormula` changes the GPU's gamma transfer table, which dims
-  and tints the image before it's sent out. Not true backlight dimming, but it works
-  regardless of the monitor.
+| App | Great at | Difference |
+|---|---|---|
+| [MonitorControl](https://github.com/MonitorControl/MonitorControl) | Free, open source; DDC brightness and volume from your keyboard keys, with software dimming as a fallback | No turning monitors off, no color temperature |
+| [BetterDisplay](https://github.com/waydabber/BetterDisplay) | Everything: virtual displays, EDID overrides, picture-in-picture | A much bigger app, with many features in the paid Pro tier |
+| [Lunar](https://lunar.fyi) | Adaptive brightness that follows ambient light | The adaptive features are paid |
+| f.lux / Night Shift | Automatic color temperature by time of day | Same for every display; no brightness or power |
+| [DisplayBuddy](https://displaybuddy.app) | Polished presets across many monitors | Paid |
 
-DisplayWave uses DDC for brightness when a monitor supports it, because only that
-genuinely lowers light output, and falls back to gamma otherwise. Power and color
-temperature always take the OS-level route, so they work on every monitor.
+If you want keyboard brightness keys on DDC monitors, use MonitorControl. If you
+want virtual displays or EDID overrides, get BetterDisplay. If you want one small
+free menu that turns monitors off and dims and warms them whether or not they
+support DDC, use this.
 
-In the normal range the two are not stacked — the backlight does the dimming and
-gamma stays at full, so the picture isn't doubly dark. Below 25% they stack on
-purpose: the backlight keeps going down to the monitor's own minimum *and* gamma
-joins in, bottoming out at 35%. Many monitors' lowest backlight setting is still
-bright in a dark room, and this is the only way past it.
+## How it works
 
-Backlight values are scaled to the maximum the monitor reports over DDC (usually
-100, but the standard doesn't require it) and never written past it. The app asks
-for nothing the hardware hasn't said it accepts.
+There are two ways to control a monitor:
 
-### Kelvin, and why brightness isn't in nits
+- **DDC/CI** sends commands down the video cable asking the monitor to change its
+  own settings. It's the only way to really dim the backlight, but it only works if
+  the monitor supports it and every cable and adapter in between passes it through.
+- **OS-level control** changes what the Mac sends instead. Turning a monitor off uses
+  the private `CGSConfigureDisplayEnabled` API, so macOS stops driving the display
+  and it goes to standby by itself. Color temperature, and brightness on monitors
+  without DDC, adjust the GPU's gamma table.
 
-Colour temperature is shown in kelvin because kelvin is what it actually is. The
-number isn't a label stuck on a slider position — it drives the gamma table. The
-white point of a blackbody at the chosen temperature is computed with Tanner
-Helland's fit to the Planckian locus, the same approximation Redshift and the
-various f.lux-alikes use, and normalised so 6500K comes out as no change at all.
-Ask for 2700K and you get a 2700K white point, near enough to see.
+DisplayWave uses DDC for brightness where it can and gamma everywhere else. Normally
+only one of them dims, so the picture isn't doubly dark. Below 25% they stack on
+purpose, because many monitors' lowest backlight is still bright in a dark room.
+Backlight values are scaled to the maximum the monitor reports and never sent past it.
 
-Brightness stays in percent, and that's deliberate. Nits (cd/m²) are a real
-photometric unit, but nothing here can measure them:
+Color temperature is a real kelvin white point (Tanner Helland's blackbody fit, the
+one Redshift uses), normalized so 6500K is no change. Brightness stays a percentage:
+DDC's brightness scale has no physical unit, and nothing here can measure nits.
 
-- DDC's luminance command (VCP `0x10`) is an opaque 0…max scale. The standard gives
-  it no photometric meaning, and monitors don't agree on one — 50 on one panel is
-  not 50 on another.
-- The gamma path dims the *image*, not the backlight. It changes what's sent to the
-  monitor, so it has no defined light output at all.
-- macOS exposes no API for a display's actual luminance.
+**Probing DDC safely.** A monitor that ignores DDC can block a request inside the
+kernel for over a minute, and killing a request midway can knock the display off
+the system until it's replugged. So each monitor is probed once on a thread that's
+abandoned rather than killed on timeout, the result is cached, and a failed channel
+is never retried unless you click **Resync Monitors**. Finding a monitor's DDC
+channel walks the I/O registry, which macOS can cut short while displays are
+changing, so the walk repeats until it gets a complete pass.
 
-A nits figure would have to be invented from a peak-brightness number typed in off a
-spec sheet, then scaled by a curve nobody measured. That's a guess wearing a unit's
-clothing, and a wrong number in real units is worse than an honest relative one — so
-brightness reads as a percentage, which is also what MonitorControl, Lunar and macOS
-itself show.
+**Blackout** doesn't use display sleep: anything can wake a sleeping display, and
+sleep can drop monitors off the bus. Instead it sets gamma to black and, on DDC
+monitors, turns the backlight to zero and switches the panel to soft-off (never
+hard-off, which some monitors only leave via their power button). The displays stay
+awake and connected the whole time. Quitting mid-blackout switches the panels back
+on first; only a force-quit can leave a DDC panel off, and its power button or a
+replug wakes it.
 
-### Detecting DDC support safely
+**Safety.** Turning displays off only lasts for the session, so a restart always
+brings every display back. The app won't turn off your last active display, and
+brightness never drops below 15% (5% on DDC monitors) so you can always see the
+menu. Blackout is the one exception, and any key, click, wake, or quit ends it.
 
-A monitor that ignores DDC is not merely slow to answer. `IOAVServiceWriteI2C` can
-block inside the kernel for over a minute on a dead channel, and killing a thread
-partway through a transaction can drop the display off the system entirely until it
-is physically unplugged and replugged. So detection:
-
-- probes each monitor **once**, caches the verdict, and never probes again unasked
-- runs on a detached thread that is **abandoned rather than killed** if it times out
-- never retries a channel that already failed
-
-A display reconfiguration — a mode change, sleep, replugging — also tears down the
-DDC service handles, and writes through a stale handle silently vanish. The app
-re-resolves handles after every reconfiguration and wake (registry-only, no DDC
-traffic), and if a backlight write still fails it re-resolves once more and retries,
-so brightness keeps working without manual intervention. A monitor plugged in after
-launch is probed then too, rather than being left on gamma-only dimming until the
-next restart.
-
-Use **Resync Monitors** after changing a cable or enabling DDC/CI in a monitor's own
-on-screen menu — that's the one case that needs a fresh probe rather than a fresh
-handle.
-
-DisplayWave also resyncs on its own after every display change, after the Mac or
-just its screens wake, on returning to your session, and after Blackout ends. What
-it does is logged; if something goes wrong, run this right afterwards and include
-the output in an issue:
-
-```bash
-/usr/bin/log show --last 30m --info --predicate 'subsystem == "local.wave.displaywave"'
-```
-
-#### The registry walk has to be retried
-
-Finding a monitor's DDC channel means walking the I/O registry, and IOKit invalidates
-a registry iterator the instant anything else modifies the registry mid-walk. It then
-stops early and returns a short list — no error, no partial-result flag. The registry
-churns constantly around displays, most of all in the seconds after one is plugged
-in, which is exactly when this runs.
-
-A truncated walk is indistinguishable from *this monitor has no DDC channel*, so
-ignoring it costs a perfectly capable monitor its backlight control for the whole
-session. In practice the first walk after launch can stop a few dozen entries into
-several thousand and find nothing at all, while an immediate retry completes and
-finds every monitor. So the walk checks `IOIteratorIsValid` afterwards and repeats
-itself, with a short backoff, until one pass gets all the way through a registry
-that held still.
-
-### Notes
-
-- Disconnecting a display **removes it from the display list entirely**, so its ID
-  is saved — otherwise there'd be no way to bring it back.
-- Power changes are session-scoped, so **a restart always restores every display**
-  regardless of app state.
-- The app refuses to turn off the last active display.
-- Brightness has a floor — 15% on gamma-only monitors, 5% on DDC ones — so a screen
-  can never go fully black and leave no way to reach the menu. **Blackout** is the
-  deliberate exception: it goes all the way, so it has four ways out. Any keypress or
-  click leaves it, waking the Mac leaves it, quitting the app leaves it, and macOS
-  itself reverts the gamma if the app ever dies.
-- Blackout never touches OS display sleep. Forced display sleep is a one-shot that
-  anything on the system can undo — a notification relights the screens and nothing
-  puts them back — it drops monitors into deep standby or off the bus entirely, and
-  it is precisely what keep-awake exists to prevent, so the two could never be on
-  together. Instead the darkness comes from the panels themselves: gamma to black on
-  the GPU, and on DDC monitors backlight to zero plus the panel switched off via the
-  DDC power control (VCP D6, the DPM soft-off — never hard-off, which some monitors
-  only leave by their own power button). The displays stay formally awake the whole
-  time — blackout holds a display-sleep assertion of its own — so they never
-  disconnect and windows never move.
-- Whether a monitor honours the power control is settled by one DDC read the first
-  time blackout is used on it, and cached like the DDC verdict itself. *Resync
-  Monitors* clears it along with everything else.
-- Quitting mid-blackout switches the panels back on before the process exits. The
-  one gap is a force-kill mid-blackout: macOS reverts the gamma, but a panel
-  switched off over DDC stays off until the monitor's own power button — or a
-  replug — wakes it.
-- Blackout detects input by asking the system how long the keyboard and mouse button
-  have been idle, which needs no permissions — unlike monitoring events, which would
-  demand an accessibility grant. Mouse *movement* is ignored on purpose, so a nudged
-  desk doesn't light the room — and since the panels are off rather than asleep,
-  a nudge can't relight them anyway.
-- macOS reverts a process's gamma changes when that process exits, which is why the
-  app has to keep running for its settings to hold.
-- These are private Apple APIs: not App Store distributable, and Apple can change
-  them in any macOS release.
+These are private Apple APIs, so DisplayWave can't be on the App Store, and a macOS
+update could break them.
 
 ## Development
 
 ```bash
+./build.sh
 ./DisplayWave.app/Contents/MacOS/DisplayWave --preview out.png
 ```
 
-Renders the menu's cards to an image so layout can be checked without opening the
-menu by hand. Two things that cost time to discover:
+`--preview` renders the menu's cards to an image so layout can be checked without
+opening the menu. Run the executable inside the bundle: the bare binary uses a
+different preferences domain and shows defaults instead of your settings.
 
-- AppKit controls are layer-backed. They only capture via `CALayer.render(in:)` from
-  inside a running app with a real window; `cacheDisplay` alone produces a blank image.
-- Run the executable **inside the bundle**, not the bare binary — run bare, it gets
-  a different preferences domain and shows defaults instead of your real settings.
-
-`tools/` holds small diagnostic programs: `enum` lists the online displays, `probe/`
-walks display ports attempting checksum-verified DDC reads, `modetest` lists and
-switches display modes, `gammatest` verifies the gamma APIs apply on a given
-machine, and `awaketest` exercises the keep-awake assertions. Build them from the
-repo root:
+`tools/` has small diagnostic programs. Build them from the repo root:
 
 ```bash
-swiftc -import-objc-header tools/cd.h tools/enum.swift -o tools/enumdisp -framework CoreDisplay
-swiftc -import-objc-header tools/cd.h tools/modetest.swift -o tools/modetest -framework CoreDisplay
-swiftc -import-objc-header tools/cd.h tools/gammatest.swift -o tools/gammatest -framework CoreDisplay
-swiftc -import-objc-header tools/probe/ioav.h tools/probe/probe.swift -o tools/probe/probe -framework IOKit
-swiftc tools/awaketest.swift -o tools/awaketest   # quit DisplayWave first, or its Keep Awake skews the result
+swiftc -import-objc-header tools/cd.h tools/enum.swift -o tools/enumdisp -framework CoreDisplay           # list displays
+swiftc -import-objc-header tools/cd.h tools/modetest.swift -o tools/modetest -framework CoreDisplay       # list and switch modes
+swiftc -import-objc-header tools/cd.h tools/gammatest.swift -o tools/gammatest -framework CoreDisplay     # check gamma works
+swiftc -import-objc-header tools/probe/ioav.h tools/probe/probe.swift -o tools/probe/probe -framework IOKit  # probe DDC
+swiftc tools/awaketest.swift -o tools/awaketest   # keep-awake assertions; quit DisplayWave first
 ```
 
-If DDC hangs on a port, stop probing it. Repeated writes to a wedged channel can
-drop the display off the system until it's physically replugged.
+If DDC hangs on a port, stop probing it: repeated writes to a stuck channel can drop
+the display until it's replugged.
 
 ## License
 
-MIT — free to use, modify, and share.
+MIT. See [LICENSE](LICENSE).
