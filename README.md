@@ -13,7 +13,9 @@ clean menu.
 It exists because the other options are either paywalled and too complicated with features
 or they don't handle it all in one app. DisplayWave is free and open source. Enjoy!
 
-<img src="assets/menu.png" width="340" alt="The DisplayWave menu: presets and layouts at the top, a card per monitor with brightness and color temperature controls and its display mode, turned-off displays, Keep Mac Awake, Blackout, and utility items">
+<p align="center">
+  <img src="assets/menu.png" width="340" alt="The DisplayWave menu: presets and layouts at the top, a card per monitor with brightness and color temperature controls and its display mode, turned-off displays, Keep Mac Awake, Blackout, and utility items">
+</p>
 
 ## Install
 
@@ -149,6 +151,10 @@ Presets sit at the top of the menu. Three come built in, applying to every displ
 
 **Edit Presets…** is where you make them yours:
 
+<p align="center">
+  <img src="assets/presets.png" width="414" alt="The Presets window: each preset's name, how many displays it covers, a Save button and a delete button, with New from Current Settings and Restore Defaults below">
+</p>
+
 - **New from Current Settings** — set your monitors up how you like, then save that
   arrangement as a preset. It records each monitor separately, so a preset can leave
   one screen bright and another dim.
@@ -166,6 +172,10 @@ click **Save Current Arrangement** in the *Layouts* row. A layout remembers, per
 monitor, its position, which display is main, and its resolution and refresh rate.
 Click it later and every monitor it knows moves back in one go, the way System
 Settings applies a change. Monitors it doesn't know are left where they are.
+
+<p align="center">
+  <img src="assets/layouts.png" width="414" alt="The Layouts window: each layout's name, how many displays it covers, a Save button and a delete button, with New from Current Arrangement below">
+</p>
 
 **Edit Layouts…** renames, re-saves and deletes them, just like presets. Layouts
 don't turn monitors on or off.
