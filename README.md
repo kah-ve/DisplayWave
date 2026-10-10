@@ -190,11 +190,11 @@ changing, so the walk repeats until it gets a complete pass.
 
 **Blackout** doesn't use display sleep: anything can wake a sleeping display, and
 sleep can drop monitors off the bus. Instead it sets gamma to black and, on DDC
-monitors, turns the backlight to zero and switches the panel to soft-off (never
-hard-off, which some monitors only leave via their power button). The displays stay
-awake and connected the whole time. Quitting mid-blackout switches the panels back
-on first; only a force-quit can leave a DDC panel off, and its power button or a
-replug wakes it.
+monitors, turns the backlight to zero. It doesn't switch panels off over DDC: some
+monitors go into standby and won't come back without their power button. The
+displays stay awake and connected the whole time. Quitting mid-blackout turns the
+backlights back up first; only a force-quit can leave one at zero, and opening
+DisplayWave again fixes it.
 
 **Safety.** Turning displays off only lasts for the session, so a restart always
 brings every display back. The app won't turn off your last active display, and

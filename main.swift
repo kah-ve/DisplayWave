@@ -670,15 +670,19 @@ func applyGamma(_ id: CGDirectDisplayID, brightness: Double, kelvin: Double, flo
 
 /// Takes every display dark without letting go of it — for leaving the Mac working
 /// overnight without lighting up the room. The picture goes to black on the GPU, and
-/// a monitor that answers DDC has its backlight zeroed and its panel switched off
-/// outright over the same channel. The displays stay awake and connected the whole
-/// time: no OS display sleep, so nothing disconnects, no windows move, and Keep Mac
+/// a monitor that answers DDC has its backlight zeroed too. The displays stay awake
+/// and connected the whole time: no OS display sleep, so nothing disconnects, no windows move, and Keep Mac
 /// Awake carries on holding its assertions instead of fighting this one.
 ///
 /// It used to work the other way — `pmset displaysleepnow` — but forced display
 /// sleep is a one-shot the rest of the system happily undoes, drops monitors into
 /// deep standby or off the bus entirely, and is exactly the thing keep-awake exists
-/// to prevent. Darkness that comes from the panels themselves needs none of it.
+/// to prevent. Darkness made from the picture and the backlight needs none of it.
+///
+/// Nor does it switch panels off over DDC (power mode, VCP D6). Monitors implement
+/// that inconsistently, and some go into standby and ignore the command to come back
+/// until their power button is pressed. The backlight at zero behind a black picture
+/// is nearly as dark and always comes back.
 ///
 /// The normal brightness floors exist so a screen can't go dark enough to hide the
 /// menu; this deliberately steps past them, so it is session-only and quitting or
@@ -721,26 +725,15 @@ final class Blackout {
         watchdog?.invalidate()
         watchdog = nil
         KeepAwake.shared.updateDisplayHold()
-        wakePanels()
         applyAll()
         diag.log("Blackout off")
-        // A panel coming back from DDC soft-off takes its time, and can come back with
-        // its own idea of brightness; settle everything again once it has.
+        // A monitor can be slow to take its backlight back up, or settle on its own
+        // idea of brightness; apply everything again once it has.
         Resync.schedule(after: 2.0)
     }
 
-    /// Switches every DDC panel back on before its brightness is restored. Monitors
-    /// without power control never went off — their gamma restore is the whole wake.
-    private func wakePanels() {
-        for d in onlineDisplays() where d.active {
-            guard Capabilities.shared.mode(for: d.key) == .hardware,
-                  let service = Capabilities.shared.service(for: d.key) else { continue }
-            Backlight.shared.setPanelPower(on: true, display: d, service: service)
-        }
-    }
-
     /// Quit is one of blackout's promised ways out, and macOS reverts the gamma on
-    /// its own when the process dies — but a panel switched off over DDC stays off
+    /// its own when the process dies — but a backlight zeroed over DDC stays at zero
     /// until someone says otherwise, so say otherwise before the process goes away.
     /// Synchronous: the queues that normally carry DDC writes die with the app.
     func restoreForQuit() {
@@ -761,7 +754,7 @@ final class Blackout {
     /// how long input has been idle needs no permissions, where monitoring events
     /// does. Both count, so there are two ways back from a black screen. Mouse
     /// *movement* is ignored on purpose: a nudged desk shouldn't light the room —
-    /// and since the panels are off rather than asleep, it can't wake them anyway.
+    /// and since the screens are dark rather than asleep, it can't wake them anyway.
     private func watchForInput() {
         startedAt = Date()
         let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
@@ -800,15 +793,12 @@ func apply(_ display: Display) {
     let ceiling = Capabilities.shared.maxLuminance(for: display.key)
 
     if Blackout.shared.active {
-        // Backlight as low as it goes, gamma past its usual floor, and the panel
-        // itself switched off where the monitor allows it — in that order, on the
-        // same queue, so the panel comes back with its brightness already at the
-        // bottom. As warm as it goes too, for whatever glow remains — blue light is
-        // the part that keeps you awake.
+        // Backlight as low as it goes and gamma past its usual floor. As warm as it
+        // goes too, for whatever glow remains — blue light is the part that keeps
+        // you awake.
         if let service = hardwareService {
             Backlight.shared.set(percent: Blackout.level, display: display, service: service,
                                  ceiling: ceiling)
-            Backlight.shared.setPanelPower(on: false, display: display, service: service)
         }
         applyGamma(display.id, brightness: Blackout.level, kelvin: warmestKelvin,
                    floor: Blackout.level)
@@ -931,9 +921,9 @@ final class KeepAwake {
     static let maxHours: Double = 24
 
     // Two separate assertions: one keeps the Mac itself running, the other keeps the
-    // screens from sleeping. Blackout holds the second one too — its darkness comes
-    // from the panels themselves, and OS display sleep would drop the monitors into
-    // deep standby or disconnect them outright.
+    // screens from sleeping. Blackout holds the second one too — its darkness is the
+    // app's own doing, and OS display sleep would drop the monitors into deep
+    // standby or disconnect them outright.
     private var systemAssertion = IOPMAssertionID(0)
     private var displayAssertion = IOPMAssertionID(0)
     private var holdingDisplay = false
@@ -1616,8 +1606,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// Settings are written back lazily while sliders move; make sure the last of
     /// them reaches disk before the app goes away. And if the app dies mid-blackout,
-    /// panels switched off over DDC have to be switched back on — gamma reverts by
-    /// itself, panel power doesn't.
+    /// backlights zeroed over DDC have to be turned back up — gamma reverts by
+    /// itself, the backlight doesn't.
     func applicationWillTerminate(_ notification: Notification) {
         Blackout.shared.restoreForQuit()
         Store.shared.flush()
