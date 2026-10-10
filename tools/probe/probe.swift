@@ -26,7 +26,10 @@ func ddcComm(service: IOAVService?, send: [UInt8], readReply: Bool,
     var reply = [UInt8](repeating: 0, count: readReply ? 11 : 0)
     var packet: [UInt8] = [UInt8(0x80 | (send.count + 1)), UInt8(send.count)] + send + [0]
     packet[packet.count - 1] = checksum(
-        chk: send.count == 1 ? DDC_7BIT_ADDRESS << 1 : DDC_7BIT_ADDRESS << 1 ^ DDC_DATA_ADDRESS,
+        // Seeded with both address bytes the controller puts on the wire, for reads
+        // as well as writes. Seeding reads with the chip address alone gets past
+        // monitors that don't check, and silently fails on the ones that do.
+        chk: DDC_7BIT_ADDRESS << 1 ^ DDC_DATA_ADDRESS,
         data: packet, start: 0, end: packet.count - 2)
     var success = false
     for _ in 0 ..< retries {

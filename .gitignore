@@ -6,12 +6,8 @@ DisplayWave.app/
 
 # Compiled diagnostic tools
 tools/probe/probe
-tools/probe/probe2
-tools/probe/probe3
 tools/enumdisp
-tools/testdisp
 tools/gammatest
-tools/vis
 tools/modetest
 tools/awaketest
 

@@ -1,6 +1,6 @@
 // Lists every usable mode per display; with `set <id> <w> <h> <hz>` switches to
 // that mode, waits three seconds, and switches back. Used to verify the mode-set
-// path DisplayWave's dropdowns use.
+// path DisplayWave's mode menu and layouts use.
 import CoreGraphics
 import Foundation
 
