@@ -1,6 +1,11 @@
 import CoreGraphics
 import Foundation
 import IOKit
+import os
+
+/// Where DisplayWave says what it's doing to the displays. Read it with
+/// `/usr/bin/log show --last 30m --predicate 'subsystem == "local.wave.displaywave"' --info`.
+let diag = Logger(subsystem: "local.wave.displaywave", category: "displays")
 
 // DDC/CI — talking to the monitor over the video cable to drive its actual backlight.
 //
@@ -310,8 +315,10 @@ final class Capabilities {
                 // filter over a list already in hand, with no DDC traffic behind it.
                 guard let service else { continue }
                 if let max = Self.probe(service) {
+                    diag.log("\(display.name, privacy: .public) answers DDC (max \(max))")
                     self.store(display.key, .hardware, service, max: max)
                 } else {
+                    diag.log("\(display.name, privacy: .public) doesn't answer DDC; using gamma")
                     // It had a channel and didn't answer on it. That's a real verdict,
                     // paid for with a real probe, so it's recorded and never retried.
                     self.store(display.key, .software, nil)
@@ -462,7 +469,15 @@ final class Backlight {
                 return
             }
             lock.unlock()
-            if !ddcWrite(service, vcp: vcpLuminance, value: value), !reattached {
+            let started = Date()
+            let ok = ddcWrite(service, vcp: vcpLuminance, value: value)
+            let took = Date().timeIntervalSince(started)
+            // A healthy write takes a few tens of milliseconds. Anything slow or failed
+            // is worth a line: a channel that stalls is a suspect for stutter.
+            if !ok || took > 0.25 {
+                diag.log("Brightness write to \(display.name, privacy: .public) \(ok ? "took" : "failed after", privacy: .public) \(Int(took * 1000)) ms")
+            }
+            if !ok, !reattached {
                 // A failed write usually means the service went stale after a display
                 // reconfiguration. Re-resolve it once and retry; this only runs for
                 // monitors that have already proven they answer DDC.

@@ -11,11 +11,12 @@ import ServiceManagement
 //   Brightness / colour temperature
 //            — applied through the GPU's gamma transfer table rather than by asking
 //              the monitor to change its own settings. Also works without DDC, which
-//              matters because most monitors on this desk don't answer DDC at all.
+//              matters because plenty of monitors and adapters don't pass DDC at all.
 //              Temperature is a real kelvin figure that drives the table, not a
 //              slider position with a label on it.
 //   Mode     — resolution and refresh rate, switched the same way System Settings
-//              does it, from dropdowns on each display's card.
+//              does it, from a submenu under each display's card. Layouts save the
+//              modes and the arrangement of every display together.
 //
 // macOS resets gamma whenever the display configuration changes or the machine wakes,
 // so settings are reapplied from a reconfiguration callback.
@@ -144,6 +145,17 @@ struct Scale {
                               presets: [2000, 2700, 3400, 4200, 6500], unit: kelvinString)
 }
 
+/// Something saved under a name that can be recaptured from how the displays are
+/// right now and kept in the defaults as a plain property list — a preset or a layout.
+protocol Snapshot {
+    var name: String { get set }
+    /// One line for the editor saying what it covers.
+    var detail: String { get }
+    static func fromCurrent(name: String) -> Self
+    init?(plist: [String: Any])
+    var plist: [String: Any] { get }
+}
+
 /// A named snapshot of how the desk should look: what each monitor's brightness and
 /// colour temperature should be. One click puts every display back to it.
 struct Preset {
@@ -159,6 +171,15 @@ struct Preset {
         settings[key] ?? settings[Preset.anyDisplay]
     }
 
+    /// How many displays this preset names. An entry under a bare product name,
+    /// left by an older version, isn't counted again once it's been adopted.
+    var displayCount: Int {
+        let keys = settings.keys.filter { $0 != Preset.anyDisplay }
+        return keys.filter { k in !keys.contains { $0.hasPrefix(k + "#") } }.count
+    }
+}
+
+extension Preset: Snapshot {
     /// Captures what every active display is set to right now.
     static func fromCurrent(name: String) -> Preset {
         let displays = onlineDisplays().filter(\.active)
@@ -171,11 +192,24 @@ struct Preset {
         return Preset(name: name, settings: settings)
     }
 
-    /// How many displays this preset names. An entry under a bare product name,
-    /// left by an older version, isn't counted again once it's been adopted.
-    var displayCount: Int {
-        let keys = settings.keys.filter { $0 != Preset.anyDisplay }
-        return keys.filter { k in !keys.contains { $0.hasPrefix(k + "#") } }.count
+    /// "All displays" for a preset that applies everywhere, otherwise how many
+    /// monitors it remembers.
+    var detail: String {
+        let named = displayCount
+        if named == 0 { return "All displays" }
+        return named == 1 ? "1 display" : "\(named) displays"
+    }
+
+    init?(plist entry: [String: Any]) {
+        guard let name = entry["name"] as? String,
+              let values = entry["settings"] as? [String: [Double]] else { return nil }
+        self.init(name: name, settings: values.compactMapValues { v in
+            v.count == 2 ? Settings(brightness: v[0], kelvin: migratedKelvin(v[1])) : nil
+        })
+    }
+
+    var plist: [String: Any] {
+        ["name": name, "settings": settings.mapValues { [$0.brightness, $0.kelvin] }]
     }
 }
 
@@ -185,39 +219,57 @@ let defaultPresets = [
     Preset(name: "Night", settings: [Preset.anyDisplay: Settings(brightness: 0.35, kelvin: 2700)]),
 ]
 
-/// The user's presets, in menu order. Editable via "Edit Presets…".
-final class PresetStore {
-    static let shared = PresetStore()
-    private let key = "presets"
-    private(set) var presets: [Preset] = defaultPresets
+/// What the editor window sees of a list of snapshots, whatever kind they are.
+protocol SnapshotList: AnyObject {
+    var names: [String] { get }
+    func detail(at index: Int) -> String
+    /// Presets keep at least one, since an empty row would have nothing to click;
+    /// layouts can all go.
+    var minimumCount: Int { get }
+    var canRestoreDefaults: Bool { get }
+    func addFromCurrent(name: String)
+    func updateFromCurrent(index: Int)
+    func rename(index: Int, to name: String)
+    func remove(index: Int)
+    func resetToDefaults()
+}
 
-    private init() {
+/// Saved snapshots in menu order. Editable via the editor window.
+final class SnapshotStore<Item: Snapshot>: SnapshotList {
+    private let key: String
+    private let defaults: [Item]
+    let minimumCount: Int
+    private(set) var items: [Item]
+
+    init(key: String, defaults: [Item], minimumCount: Int) {
+        self.key = key
+        self.defaults = defaults
+        self.minimumCount = minimumCount
+        items = defaults
         guard let raw = UserDefaults.standard.array(forKey: key) as? [[String: Any]] else { return }
-        let loaded = raw.compactMap { entry -> Preset? in
-            guard let name = entry["name"] as? String,
-                  let values = entry["settings"] as? [String: [Double]] else { return nil }
-            let settings = values.compactMapValues { v in
-                v.count == 2 ? Settings(brightness: v[0], kelvin: migratedKelvin(v[1])) : nil
-            }
-            return Preset(name: name, settings: settings)
-        }
-        if !loaded.isEmpty { presets = loaded }
+        let loaded = raw.compactMap(Item.init(plist:))
+        if !loaded.isEmpty { items = loaded }
     }
 
     private func save() {
-        UserDefaults.standard.set(presets.map { preset in
-            ["name": preset.name,
-             "settings": preset.settings.mapValues { [$0.brightness, $0.kelvin] }]
-        }, forKey: key)
+        UserDefaults.standard.set(items.map(\.plist), forKey: key)
     }
 
-    /// Names have to be distinct — they're how presets are told apart in the menu.
+    var names: [String] { items.map(\.name) }
+
+    func detail(at index: Int) -> String {
+        items.indices.contains(index) ? items[index].detail : ""
+    }
+
+    var canRestoreDefaults: Bool { !defaults.isEmpty }
+
+    /// Names have to be distinct — they're how snapshots are told apart in the menu.
     private func uniqueName(_ wanted: String, excluding index: Int? = nil) -> String {
-        let taken = presets.enumerated()
+        let taken = items.enumerated()
             .filter { $0.offset != index }
             .map { $0.element.name.lowercased() }
         var name = wanted.trimmingCharacters(in: .whitespaces)
-        if name.isEmpty { name = "Preset" }
+        if name.isEmpty { name = "Untitled" }
         var candidate = name, n = 2
         while taken.contains(candidate.lowercased()) {
             candidate = "\(name) \(n)"
@@ -226,46 +278,115 @@ final class PresetStore {
         return candidate
     }
 
-    /// The preset counterpart of `Store.adopt`.
-    func adopt(_ key: String, from legacy: String) {
-        var changed = false
-        for i in presets.indices where presets[i].settings[key] == nil {
-            guard let old = presets[i].settings[legacy] else { continue }
-            presets[i].settings[key] = old
-            changed = true
-        }
-        if changed { save() }
-    }
-
     func addFromCurrent(name: String) {
-        presets.append(Preset.fromCurrent(name: uniqueName(name)))
+        items.append(Item.fromCurrent(name: uniqueName(name)))
         save()
     }
 
-    /// Replaces a preset's contents with the way the displays look right now.
+    /// Replaces a snapshot's contents with the way the displays are right now.
     func updateFromCurrent(index: Int) {
-        guard presets.indices.contains(index) else { return }
-        presets[index] = Preset.fromCurrent(name: presets[index].name)
+        guard items.indices.contains(index) else { return }
+        items[index] = Item.fromCurrent(name: items[index].name)
         save()
     }
 
     func rename(index: Int, to name: String) {
-        guard presets.indices.contains(index) else { return }
-        presets[index].name = uniqueName(name, excluding: index)
+        guard items.indices.contains(index) else { return }
+        items[index].name = uniqueName(name, excluding: index)
         save()
     }
 
     func remove(index: Int) {
-        guard presets.indices.contains(index) else { return }
-        presets.remove(at: index)
+        guard items.indices.contains(index), items.count > minimumCount else { return }
+        items.remove(at: index)
         save()
     }
 
     func resetToDefaults() {
-        presets = defaultPresets
+        items = defaults
         UserDefaults.standard.removeObject(forKey: key)
     }
 }
+
+extension SnapshotStore where Item == Preset {
+    /// The preset counterpart of `Store.adopt`.
+    func adopt(_ key: String, from legacy: String) {
+        var changed = false
+        for i in items.indices where items[i].settings[key] == nil {
+            guard let old = items[i].settings[legacy] else { continue }
+            items[i].settings[key] = old
+            changed = true
+        }
+        if changed { save() }
+    }
+}
+
+let presetStore = SnapshotStore(key: "presets", defaults: defaultPresets, minimumCount: 1)
+
+// MARK: - Layouts
+
+/// Where one monitor sits in the arrangement, and the mode it runs in there.
+struct Placement {
+    var x: Int
+    var y: Int
+    var width: Int
+    var height: Int
+    /// Backing pixels across. The HiDPI mode and the plain one can share a point
+    /// size, and this is what tells them apart.
+    var pixelWidth: Int
+    var refresh: Int
+}
+
+/// A named arrangement of the desk: where each monitor sits, which one is the main
+/// display, and the resolution and refresh rate each runs at. Kept apart from
+/// presets, which are about how the picture looks rather than where it goes.
+struct Layout {
+    var name: String
+    /// Keyed by `Display.key`. Positions are in the global display space, where the
+    /// main display is by definition the one at the origin — so saving positions
+    /// saves which display is main as well.
+    var placements: [String: Placement]
+}
+
+extension Layout: Snapshot {
+    static func fromCurrent(name: String) -> Layout {
+        var placements: [String: Placement] = [:]
+        for d in onlineDisplays() where d.active {
+            // A mirror takes another display's position and mode, so has none of
+            // its own to keep. Two serial-less identical monitors share a key; the
+            // first wins, as it does for presets.
+            guard CGDisplayMirrorsDisplay(d.id) == kCGNullDirectDisplay,
+                  placements[d.key] == nil,
+                  let mode = CGDisplayCopyDisplayMode(d.id) else { continue }
+            let origin = CGDisplayBounds(d.id).origin
+            placements[d.key] = Placement(x: Int(origin.x), y: Int(origin.y),
+                                          width: mode.width, height: mode.height,
+                                          pixelWidth: mode.pixelWidth,
+                                          refresh: Int(mode.refreshRate.rounded()))
+        }
+        return Layout(name: name, placements: placements)
+    }
+
+    var detail: String {
+        placements.count == 1 ? "1 display" : "\(placements.count) displays"
+    }
+
+    init?(plist entry: [String: Any]) {
+        guard let name = entry["name"] as? String,
+              let values = entry["placements"] as? [String: [Int]] else { return nil }
+        self.init(name: name, placements: values.compactMapValues { v in
+            v.count == 6 ? Placement(x: v[0], y: v[1], width: v[2], height: v[3],
+                                     pixelWidth: v[4], refresh: v[5]) : nil
+        })
+    }
+
+    var plist: [String: Any] {
+        ["name": name,
+         "placements": placements.mapValues { [$0.x, $0.y, $0.width, $0.height, $0.pixelWidth, $0.refresh] }]
+    }
+}
+
+let layoutStore = SnapshotStore<Layout>(key: "layouts", defaults: [], minimumCount: 0)
 
 // MARK: - Display modes
 
@@ -325,6 +446,16 @@ func bestMode(_ modes: [CGDisplayMode], width: Int, height: Int, rate: Int?) -> 
     }
 }
 
+/// A mode a menu item would switch a display to.
+final class ModeChoice {
+    let display: CGDirectDisplayID
+    let mode: CGDisplayMode
+    init(display: CGDirectDisplayID, mode: CGDisplayMode) {
+        self.display = display
+        self.mode = mode
+    }
+}
+
 // .permanently matches what System Settings does: the chosen mode survives restarts.
 func setMode(_ id: CGDirectDisplayID, _ mode: CGDisplayMode) {
     var config: CGDisplayConfigRef?
@@ -334,6 +465,65 @@ func setMode(_ id: CGDirectDisplayID, _ mode: CGDisplayMode) {
         CGCancelDisplayConfiguration(config)
         return
     }
+}
+
+/// The mode a placement asks for on this display, or nil when it's already in it —
+/// switching modes blanks the screen for a moment, so it isn't done for nothing.
+/// The exact mode is used where the monitor still offers it; otherwise the nearest
+/// one, chosen the way the resolution menu chooses.
+private func mode(for placement: Placement, on display: Display) -> CGDisplayMode? {
+    func matches(_ m: CGDisplayMode) -> Bool {
+        m.width == placement.width && m.height == placement.height
+            && m.pixelWidth == placement.pixelWidth
+            && Int(m.refreshRate.rounded()) == placement.refresh
+    }
+    if let current = CGDisplayCopyDisplayMode(display.id), matches(current) { return nil }
+    let modes = displayModes(display.id)
+    return modes.first(where: matches)
+        ?? bestMode(modes, width: placement.width, height: placement.height, rate: placement.refresh)
+}
+
+/// Puts every connected display the layout names back where it was saved and in
+/// the mode it was saved in, as one configuration change — the way System Settings
+/// applies an arrangement, so the screens rearrange once rather than once per
+/// monitor. Displays the layout doesn't name stay put, and macOS nudges them aside
+/// if anything now overlaps. Settings reapply from the reconfiguration callback.
+func applyLayout(_ layout: Layout) {
+    let present = onlineDisplays().filter(\.active).compactMap { d in
+        layout.placements[d.key].map { (display: d, placement: $0) }
+    }
+    guard !present.isEmpty else { NSSound.beep(); return }
+
+    // Positions are measured from the layout's main display. When that one isn't
+    // plugged in, measure from the current main display instead, so a monitor going
+    // missing doesn't hand the main role to whatever happens to land at the origin.
+    let savedMainPresent = present.contains { $0.placement.x == 0 && $0.placement.y == 0 }
+    let anchor = savedMainPresent ? nil
+        : present.first { CGDisplayIsMain($0.display.id) != 0 }?.placement
+    let dx = anchor?.x ?? 0, dy = anchor?.y ?? 0
+
+    var config: CGDisplayConfigRef?
+    guard CGBeginDisplayConfiguration(&config) == .success, let config else { return }
+    for (display, placement) in present {
+        let modeOK = mode(for: placement, on: display).map {
+            CGConfigureDisplayWithDisplayMode(config, display.id, $0, nil) == .success
+        } ?? true
+        let originOK = CGConfigureDisplayOrigin(config, display.id, Int32(placement.x - dx),
+                                                Int32(placement.y - dy)) == .success
+        guard modeOK, originOK else {
+            CGCancelDisplayConfiguration(config)
+            diag.error("Layout \(layout.name, privacy: .public): couldn't configure \(display.name, privacy: .public)")
+            NSSound.beep()
+            return
+        }
+    }
+    guard CGCompleteDisplayConfiguration(config, .permanently) == .success else {
+        CGCancelDisplayConfiguration(config)
+        diag.error("Layout \(layout.name, privacy: .public): configuration rejected")
+        NSSound.beep()
+        return
+    }
+    diag.log("Applied layout \(layout.name, privacy: .public) to \(present.count) displays")
 }
 
 // MARK: - Display enumeration
@@ -518,6 +708,7 @@ final class Blackout {
             KeepAwake.shared.updateDisplayHold()
             watchForInput()
             applyAll()
+            diag.log("Blackout on")
         }
     }
 
@@ -532,6 +723,10 @@ final class Blackout {
         KeepAwake.shared.updateDisplayHold()
         wakePanels()
         applyAll()
+        diag.log("Blackout off")
+        // A panel coming back from DDC soft-off takes its time, and can come back with
+        // its own idea of brightness; settle everything again once it has.
+        Resync.schedule(after: 2.0)
     }
 
     /// Switches every DDC panel back on before its brightness is restored. Monitors
@@ -654,7 +849,7 @@ func applyPreset(_ preset: Preset) {
 func adoptLegacySettings(_ displays: [Display]) {
     for d in displays where d.key != d.name {
         Store.shared.adopt(d.key, from: d.name)
-        PresetStore.shared.adopt(d.key, from: d.name)
+        presetStore.adopt(d.key, from: d.name)
     }
 }
 
@@ -663,9 +858,24 @@ func adoptLegacySettings(_ displays: [Display]) {
 /// dead), probes anything newly plugged in, then reapplies every setting.
 func resyncAndApply() {
     invalidateDisplayCaches()
+    logModeChanges(onlineDisplays())
     adoptLegacySettings(onlineDisplays())
     Capabilities.shared.sync(displays: onlineDisplays().filter(\.active)) {
         applyAll()
+    }
+}
+
+/// What each display was running at last resync, so a mode that changed underneath
+/// us — a refresh rate that dropped after a wake or a replug — shows up in the log.
+private var lastModes: [String: String] = [:]
+
+private func logModeChanges(_ displays: [Display]) {
+    for d in displays where d.active {
+        let now = d.modeDescription
+        if let before = lastModes[d.key], before != now {
+            diag.log("\(d.name, privacy: .public) changed mode: \(before, privacy: .public) → \(now, privacy: .public)")
+        }
+        lastModes[d.key] = now
     }
 }
 
@@ -685,6 +895,7 @@ enum Resync {
         pending?.cancel()
         let work = DispatchWorkItem {
             pending = nil
+            diag.log("Resyncing")
             resyncAndApply()
         }
         pending = work
@@ -839,13 +1050,10 @@ func label(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular,
 // brightness and colour temperature, each with a slider and its own preset buttons.
 final class DisplayCard: FlippedView {
     static let width: CGFloat = 320
-    static let height: CGFloat = 190
+    static let height: CGFloat = 164
 
     private let display: Display
-    private let allModes: [CGDisplayMode]
     private weak var hostMenu: NSMenu?
-    private let resolutionPopup = NSPopUpButton()
-    private let refreshPopup = NSPopUpButton()
 
     // A monitor that answers DDC dims its own backlight, so it can go genuinely
     // dark; everything else can only darken the image the GPU sends it. That changes
@@ -863,7 +1071,6 @@ final class DisplayCard: FlippedView {
     /// `title` is what the card is headed with — see `displayLabels`.
     init(display: Display, title: String, menu: NSMenu?, canPowerOff: Bool) {
         self.display = display
-        self.allModes = displayModes(display.id)
         self.hostMenu = menu
         let hardware = Capabilities.shared.mode(for: display.key) == .hardware
         let brightnessScale = Scale.brightness(hardware: hardware)
@@ -903,11 +1110,6 @@ final class DisplayCard: FlippedView {
         power.action = #selector(togglePower)
         power.frame = NSRect(x: Self.width - pad - 20, y: y - 1, width: 20, height: 20)
         addSubview(power)
-        y += 18
-
-        // Resolution and refresh rate — the same line that used to be read-only,
-        // now directly changeable.
-        setupModePopups(y: y, pad: pad)
         y += 26
 
         y = addControlGroup(title: hardware ? "Brightness" : "Brightness · software",
@@ -940,38 +1142,6 @@ final class DisplayCard: FlippedView {
     override func draw(_ dirtyRect: NSRect) {
         NSColor.labelColor.withAlphaComponent(0.055).setFill()
         NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 4), xRadius: 8, yRadius: 8).fill()
-    }
-
-    /// Two quiet dropdowns where the mode line used to be: one for resolution, one
-    /// for refresh rate. They read like the old label until clicked.
-    private func setupModePopups(y: CGFloat, pad: CGFloat) {
-        for popup in [resolutionPopup, refreshPopup] {
-            popup.isBordered = false
-            popup.font = .systemFont(ofSize: 11)
-            popup.target = self
-        }
-
-        for (w, h) in resolutionOptions(allModes) {
-            resolutionPopup.addItem(withTitle: "\(w) × \(h)")
-            resolutionPopup.lastItem?.representedObject = [w, h]
-        }
-        resolutionPopup.selectItem(withTitle: "\(display.width) × \(display.height)")
-        resolutionPopup.action = #selector(resolutionPicked)
-        resolutionPopup.toolTip = "Change this display's resolution"
-        resolutionPopup.frame = NSRect(x: pad - 8, y: y - 3, width: 112, height: 20)
-        addSubview(resolutionPopup)
-
-        let rates = refreshOptions(allModes, width: display.width, height: display.height)
-        for r in rates {
-            refreshPopup.addItem(withTitle: "\(r) Hz")
-            refreshPopup.lastItem?.representedObject = r
-        }
-        refreshPopup.selectItem(withTitle: "\(Int(display.refresh.rounded())) Hz")
-        refreshPopup.action = #selector(refreshRatePicked)
-        refreshPopup.toolTip = "Change this display's refresh rate"
-        refreshPopup.frame = NSRect(x: pad + 116, y: y - 3, width: 68, height: 20)
-        refreshPopup.isHidden = rates.isEmpty
-        addSubview(refreshPopup)
     }
 
     /// Lays out a labelled control: caption row with the current value, the slider
@@ -1106,71 +1276,64 @@ final class DisplayCard: FlippedView {
         setKelvin(warmthScale.presets[warmthPresetControl.selectedSegment])
     }
 
-    @objc private func resolutionPicked() {
-        guard let dims = resolutionPopup.selectedItem?.representedObject as? [Int],
-              dims.count == 2,
-              let mode = bestMode(allModes, width: dims[0], height: dims[1],
-                                  rate: display.refresh > 0 ? Int(display.refresh.rounded()) : nil)
-        else { return }
-        hostMenu?.cancelTracking()
-        setMode(display.id, mode)
-    }
-
-    @objc private func refreshRatePicked() {
-        guard let rate = refreshPopup.selectedItem?.representedObject as? Int,
-              let mode = bestMode(allModes, width: display.width, height: display.height, rate: rate)
-        else { return }
-        hostMenu?.cancelTracking()
-        setMode(display.id, mode)
-    }
-
     @objc private func togglePower() {
         hostMenu?.cancelTracking()
         AppDelegate.shared?.setPower(id: display.id, key: display.key, on: false)
     }
 }
 
-// MARK: - Presets row
+// MARK: - Snapshot rows
 
-// One click restores every display to a saved look. Presets wrap onto extra rows
-// rather than squeezing, so the labels stay readable however many there are.
-final class PresetRow: FlippedView {
+// One click puts the desk back to something saved — a preset or a layout. They wrap
+// onto extra rows rather than squeezing, so the labels stay readable however many
+// there are. With nothing saved yet the row offers to save the current state, so the
+// feature can be found from the menu itself.
+final class SnapshotRow: FlippedView {
     private static let perRow = 3
-    private var controls: [NSSegmentedControl] = []
+    private let pick: (Int) -> Void
+    private let saveFirst: () -> Void
 
-    override init(frame: NSRect) {
-        let presets = PresetStore.shared.presets
-        let rows = stride(from: 0, to: max(presets.count, 1), by: Self.perRow).map {
-            Array(presets[$0 ..< min($0 + Self.perRow, presets.count)])
+    init(title: String, names: [String], emptyTitle: String,
+         pick: @escaping (Int) -> Void, saveFirst: @escaping () -> Void) {
+        self.pick = pick
+        self.saveFirst = saveFirst
+        let rows = stride(from: 0, to: max(names.count, 1), by: Self.perRow).map {
+            Array(names[$0 ..< min($0 + Self.perRow, names.count)])
         }
         super.init(frame: NSRect(x: 0, y: 0, width: DisplayCard.width,
                                  height: 25 + CGFloat(rows.count) * 26 + 6))
         let pad: CGFloat = 16
         let contentWidth = DisplayCard.width - pad * 2
 
-        let title = label("Presets", size: 11, weight: .medium, color: .secondaryLabelColor)
-        title.frame = NSRect(x: pad, y: 6, width: contentWidth, height: 14)
-        addSubview(title)
+        let heading = label(title, size: 11, weight: .medium, color: .secondaryLabelColor)
+        heading.frame = NSRect(x: pad, y: 6, width: contentWidth, height: 14)
+        addSubview(heading)
 
-        for (row, chunk) in rows.enumerated() where !chunk.isEmpty {
-            let control = NSSegmentedControl(labels: chunk.map(\.name), trackingMode: .momentary,
-                                             target: self, action: #selector(pick(_:)))
+        guard !names.isEmpty else {
+            let save = NSButton(title: emptyTitle, target: self, action: #selector(saveCurrent))
+            save.bezelStyle = .rounded
+            save.frame = NSRect(x: pad, y: 25, width: contentWidth, height: 22)
+            addSubview(save)
+            return
+        }
+        for (row, chunk) in rows.enumerated() {
+            let control = NSSegmentedControl(labels: chunk, trackingMode: .momentary,
+                                             target: self, action: #selector(picked(_:)))
             control.segmentDistribution = .fillEqually
-            // Tag carries the index of this row's first preset.
+            // Tag carries the index of this row's first entry.
             control.tag = row * Self.perRow
             control.frame = NSRect(x: pad, y: 25 + CGFloat(row) * 26, width: contentWidth, height: 22)
             addSubview(control)
-            controls.append(control)
         }
     }
 
     required init?(coder: NSCoder) { nil }
 
-    @objc private func pick(_ sender: NSSegmentedControl) {
-        let index = sender.tag + sender.selectedSegment
-        guard PresetStore.shared.presets.indices.contains(index) else { return }
-        applyPreset(PresetStore.shared.presets[index])
+    @objc private func picked(_ sender: NSSegmentedControl) {
+        pick(sender.tag + sender.selectedSegment)
     }
+
+    @objc private func saveCurrent() { saveFirst() }
 }
 
 // MARK: - Keep awake row
@@ -1243,16 +1406,34 @@ final class KeepAwakeRow: FlippedView {
     }
 }
 
-// MARK: - Preset editor
+// MARK: - Snapshot editor
 
-// One row per preset: type to rename, Save to overwrite it with how the displays
-// look right now, ✕ to delete. Everything saves immediately.
-final class PresetEditorView: FlippedView, NSTextFieldDelegate {
+/// How the editor talks about what it's editing.
+struct EditorWording {
+    /// "Preset" or "Layout".
+    let noun: String
+    /// What "the way things are now" means for this kind: the look or the arrangement.
+    let current: String
+    let newButton: String
+
+    static let presets = EditorWording(noun: "Preset", current: "how your displays look",
+                                       newButton: "New from Current Settings")
+    static let layouts = EditorWording(noun: "Layout", current: "where your displays are",
+                                       newButton: "New from Current Arrangement")
+}
+
+// One row per preset or layout: type to rename, Save to overwrite it with how the
+// displays are right now, ✕ to delete. Everything saves immediately.
+final class SnapshotEditorView: FlippedView, NSTextFieldDelegate {
     static let width: CGFloat = 420
     private static let rowHeight: CGFloat = 32
     private weak var hostWindow: NSWindow?
+    private let list: SnapshotList
+    private let wording: EditorWording
 
-    init(window: NSWindow?) {
+    init(list: SnapshotList, wording: EditorWording, window: NSWindow?) {
+        self.list = list
+        self.wording = wording
         self.hostWindow = window
         super.init(frame: NSRect(x: 0, y: 0, width: Self.width, height: 100))
         reload()
@@ -1260,24 +1441,24 @@ final class PresetEditorView: FlippedView, NSTextFieldDelegate {
 
     required init?(coder: NSCoder) { nil }
 
-    /// Rebuilds from scratch — presets can be added and removed, so the row count
+    /// Rebuilds from scratch — entries can be added and removed, so the row count
     /// isn't fixed.
     private func reload() {
         subviews.forEach { $0.removeFromSuperview() }
-        let presets = PresetStore.shared.presets
+        let names = list.names
         let pad: CGFloat = 16
-        let height = 44 + CGFloat(presets.count) * Self.rowHeight + 48
+        let height = 44 + CGFloat(names.count) * Self.rowHeight + 48
         setFrameSize(NSSize(width: Self.width, height: height))
 
-        let heading = label("Save replaces a preset with how your displays look right now.",
+        let heading = label("Save replaces a \(wording.noun.lowercased()) with \(wording.current) right now.",
                             size: 11, color: .secondaryLabelColor)
         heading.frame = NSRect(x: pad, y: 14, width: Self.width - pad * 2, height: 16)
         addSubview(heading)
 
-        for (i, preset) in presets.enumerated() {
+        for (i, entry) in names.enumerated() {
             let y = 44 + CGFloat(i) * Self.rowHeight
 
-            let name = NSTextField(string: preset.name)
+            let name = NSTextField(string: entry)
             name.font = .systemFont(ofSize: 12)
             name.tag = i
             name.delegate = self
@@ -1286,7 +1467,7 @@ final class PresetEditorView: FlippedView, NSTextFieldDelegate {
             name.frame = NSRect(x: pad, y: y, width: 200, height: 22)
             addSubview(name)
 
-            let detail = label(describe(preset), size: 10, color: .tertiaryLabelColor)
+            let detail = label(list.detail(at: i), size: 10, color: .tertiaryLabelColor)
             detail.frame = NSRect(x: pad + 208, y: y + 4, width: 84, height: 14)
             addSubview(detail)
 
@@ -1294,7 +1475,7 @@ final class PresetEditorView: FlippedView, NSTextFieldDelegate {
             save.bezelStyle = .rounded
             save.controlSize = .small
             save.tag = i
-            save.toolTip = "Replace \"\(preset.name)\" with how the displays look right now"
+            save.toolTip = "Replace \"\(entry)\" with \(wording.current) right now"
             save.frame = NSRect(x: Self.width - pad - 92, y: y, width: 56, height: 22)
             addSubview(save)
 
@@ -1303,13 +1484,13 @@ final class PresetEditorView: FlippedView, NSTextFieldDelegate {
             delete.isBordered = false
             delete.contentTintColor = .tertiaryLabelColor
             delete.tag = i
-            delete.toolTip = "Delete \"\(preset.name)\""
-            delete.isEnabled = presets.count > 1
+            delete.toolTip = "Delete \"\(entry)\""
+            delete.isEnabled = names.count > list.minimumCount
             delete.frame = NSRect(x: Self.width - pad - 24, y: y + 2, width: 20, height: 18)
             addSubview(delete)
         }
 
-        let add = NSButton(title: "New from Current Settings", target: self, action: #selector(addNew))
+        let add = NSButton(title: wording.newButton, target: self, action: #selector(addNew))
         add.bezelStyle = .rounded
         add.controlSize = .small
         add.frame = NSRect(x: pad, y: height - 38, width: 200, height: 24)
@@ -1319,17 +1500,10 @@ final class PresetEditorView: FlippedView, NSTextFieldDelegate {
         reset.bezelStyle = .rounded
         reset.controlSize = .small
         reset.frame = NSRect(x: Self.width - pad - 130, y: height - 38, width: 130, height: 24)
+        reset.isHidden = !list.canRestoreDefaults
         addSubview(reset)
 
         hostWindow?.setContentSize(NSSize(width: Self.width, height: height))
-    }
-
-    /// "All displays" for a preset that applies everywhere, otherwise how many
-    /// monitors it remembers.
-    private func describe(_ preset: Preset) -> String {
-        let named = preset.displayCount
-        if named == 0 { return "All displays" }
-        return named == 1 ? "1 display" : "\(named) displays"
     }
 
     func controlTextDidEndEditing(_ obj: Notification) {
@@ -1338,27 +1512,27 @@ final class PresetEditorView: FlippedView, NSTextFieldDelegate {
     }
 
     @objc private func renamed(_ sender: NSTextField) {
-        PresetStore.shared.rename(index: sender.tag, to: sender.stringValue)
+        list.rename(index: sender.tag, to: sender.stringValue)
         reload()
     }
 
     @objc private func updateFromCurrent(_ sender: NSButton) {
-        PresetStore.shared.updateFromCurrent(index: sender.tag)
+        list.updateFromCurrent(index: sender.tag)
         reload()
     }
 
     @objc private func remove(_ sender: NSButton) {
-        PresetStore.shared.remove(index: sender.tag)
+        list.remove(index: sender.tag)
         reload()
     }
 
     @objc private func addNew() {
-        PresetStore.shared.addFromCurrent(name: "New Preset")
+        list.addFromCurrent(name: "New \(wording.noun)")
         reload()
     }
 
     @objc private func restoreDefaults() {
-        PresetStore.shared.resetToDefaults()
+        list.resetToDefaults()
         reload()
     }
 }
@@ -1398,6 +1572,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
+        let startup = onlineDisplays().filter(\.active)
+            .map { "\($0.name) \($0.modeDescription)" }.joined(separator: ", ")
+        diag.log("Started with \(startup, privacy: .public)")
         adoptLegacySettings(onlineDisplays())
         applyAll()
         // Work out which monitors can dim their own backlight. This touches the DDC
@@ -1408,10 +1585,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         // macOS wipes gamma on display changes and on wake, and reconfigurations also
         // invalidate the cached DDC service handles — so re-attach those, then reapply.
-        CGDisplayRegisterReconfigurationCallback({ _, flags, _ in
+        CGDisplayRegisterReconfigurationCallback({ id, flags, _ in
             // beginConfigurationFlag fires before the change lands; reapplying then
             // would just be overwritten by the change itself.
             if flags.contains(.beginConfigurationFlag) { return }
+            diag.debug("Reconfigured display \(id), flags \(flags.rawValue)")
             Resync.schedule()
         }, nil)
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -1421,7 +1599,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Blackout.shared.deactivate()
             // Displays come back at their own pace after a wake, so give them longer
             // than a plain reconfiguration would get.
+            diag.log("Mac woke")
             Resync.schedule(after: 2.0)
+        }
+        // Screens can sleep and wake on their own while the Mac stays up, and coming
+        // back into the session after a lock or a user switch is much the same — both
+        // can leave gamma wiped and DDC handles stale without any reconfiguration to
+        // say so.
+        for name in [NSWorkspace.screensDidWakeNotification, NSWorkspace.sessionDidBecomeActiveNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { note in
+                diag.log("\(note.name.rawValue, privacy: .public)")
+                Resync.schedule(after: 2.0)
+            }
         }
     }
 
@@ -1467,10 +1656,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Presets first: the one-click action people reach for most often.
         if activeCount > 0 {
             let presetsItem = NSMenuItem()
-            presetsItem.view = PresetRow(frame: .zero)
+            presetsItem.view = SnapshotRow(
+                title: "Presets", names: presetStore.names, emptyTitle: "Save Current Look",
+                pick: { i in
+                    guard presetStore.items.indices.contains(i) else { return }
+                    applyPreset(presetStore.items[i])
+                },
+                saveFirst: { presetStore.addFromCurrent(name: "Preset") })
             menu.addItem(presetsItem)
-            menu.addItem(.separator())
         }
+        // An arrangement only means something with more than one screen in it.
+        if activeCount > 1 {
+            let layoutsItem = NSMenuItem()
+            layoutsItem.view = SnapshotRow(
+                title: "Layouts", names: layoutStore.names, emptyTitle: "Save Current Arrangement",
+                pick: { [weak menu] i in
+                    guard layoutStore.items.indices.contains(i) else { return }
+                    // The screens are about to move; the open menu would be left
+                    // hanging where they used to be.
+                    menu?.cancelTracking()
+                    applyLayout(layoutStore.items[i])
+                },
+                saveFirst: { [weak menu] in
+                    menu?.cancelTracking()
+                    layoutStore.addFromCurrent(name: "Layout 1")
+                })
+            menu.addItem(layoutsItem)
+        }
+        if activeCount > 0 { menu.addItem(.separator()) }
 
         visibleCards.removeAll()
         let labels = displayLabels(online.filter(\.active))
@@ -1481,6 +1694,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let item = NSMenuItem()
             item.view = card
             menu.addItem(item)
+            menu.addItem(modeItem(for: d))
         }
         // The card backgrounds separate the displays visually; one separator closes
         // the section.
@@ -1519,6 +1733,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         blackout.state = Blackout.shared.active ? .on : .off
         blackout.image = NSImage(systemSymbolName: "moon.zzz.fill", accessibilityDescription: nil)
         blackout.toolTip = "Takes every display dark while the Mac keeps running — for leaving it working overnight. The monitors stay connected, so windows don't move. Press any key or click to bring the screens back exactly as they were."
+        // A tooltip only shows after a hover, so say what it does where it can be seen.
+        if #available(macOS 14.4, *) {
+            blackout.subtitle = "Screens dark, Mac stays on · key or click to undo"
+        }
         menu.addItem(blackout)
         menu.addItem(.separator())
 
@@ -1538,6 +1756,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         editPresets.target = self
         editPresets.toolTip = "Save the current look as a preset, or rename and delete presets"
         menu.addItem(editPresets)
+
+        let editLayouts = NSMenuItem(title: "Edit Layouts…", action: #selector(openLayoutEditor), keyEquivalent: "")
+        editLayouts.target = self
+        editLayouts.toolTip = "Save where your displays are and the resolution each runs at, or rename and delete layouts"
+        menu.addItem(editLayouts)
         menu.addItem(.separator())
 
         let resync = NSMenuItem(title: "Resync Monitors", action: #selector(recheckHardware), keyEquivalent: "")
@@ -1602,23 +1825,86 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension")!)
     }
 
-    private var presetEditor: NSWindow?
+    private var editorWindow: NSWindow?
 
     @objc private func openPresetEditor() {
-        // Rebuilt each time so it reflects the presets as they are now.
-        presetEditor?.close()
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: PresetEditorView.width, height: 100),
+        openEditor(list: presetStore, wording: .presets, title: "Presets")
+    }
+
+    @objc private func openLayoutEditor() {
+        openEditor(list: layoutStore, wording: .layouts, title: "Layouts")
+    }
+
+    private func openEditor(list: SnapshotList, wording: EditorWording, title: String) {
+        // Rebuilt each time so it reflects the list as it is now.
+        editorWindow?.close()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: SnapshotEditorView.width, height: 100),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
-        window.title = "Presets"
-        window.contentView = PresetEditorView(window: window)
+        window.title = title
+        window.contentView = SnapshotEditorView(list: list, wording: wording, window: window)
         window.isReleasedWhenClosed = false
         window.center()
-        presetEditor = window
+        editorWindow = window
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
     }
 
+    // MARK: Display modes
+
+    /// Resolution and refresh rate as a native submenu under each card. They used to
+    /// be pop-up buttons inside the card, but a pop-up can't open its own menu while
+    /// the status menu is tracking, so they never responded to a click.
+    private func modeItem(for display: Display) -> NSMenuItem {
+        let item = NSMenuItem(title: display.modeDescription, action: nil, keyEquivalent: "")
+        item.image = NSImage(systemSymbolName: "rectangle.expand.vertical", accessibilityDescription: nil)
+        item.toolTip = "Change this display's resolution and refresh rate"
+        let modes = displayModes(display.id)
+        guard !modes.isEmpty else { return item }
+        let submenu = NSMenu()
+        let currentRate = display.refresh > 0 ? Int(display.refresh.rounded()) : nil
+
+        submenu.addItem(sectionHeader("Resolution"))
+        for (w, h) in resolutionOptions(modes) {
+            let option = NSMenuItem(title: "\(w) × \(h)", action: #selector(pickMode(_:)), keyEquivalent: "")
+            option.target = self
+            option.state = w == display.width && h == display.height ? .on : .off
+            option.representedObject = bestMode(modes, width: w, height: h, rate: currentRate)
+                .map { ModeChoice(display: display.id, mode: $0) }
+            submenu.addItem(option)
+        }
+
+        let rates = refreshOptions(modes, width: display.width, height: display.height)
+        if !rates.isEmpty {
+            submenu.addItem(.separator())
+            submenu.addItem(sectionHeader("Refresh Rate"))
+            for rate in rates {
+                let option = NSMenuItem(title: "\(rate) Hz", action: #selector(pickMode(_:)), keyEquivalent: "")
+                option.target = self
+                option.state = rate == currentRate ? .on : .off
+                option.representedObject = bestMode(modes, width: display.width, height: display.height, rate: rate)
+                    .map { ModeChoice(display: display.id, mode: $0) }
+                submenu.addItem(option)
+            }
+        }
+        item.submenu = submenu
+        return item
+    }
+
+    private func sectionHeader(_ title: String) -> NSMenuItem {
+        if #available(macOS 14, *) { return .sectionHeader(title: title) }
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        return item
+    }
+
+    @objc private func pickMode(_ sender: NSMenuItem) {
+        guard let choice = sender.representedObject as? ModeChoice else { return }
+        diag.log("Mode change on display \(choice.display): \(choice.mode.width)×\(choice.mode.height) @ \(Int(choice.mode.refreshRate.rounded())) Hz")
+        setMode(choice.display, choice.mode)
+    }
+
     @objc private func recheckHardware() {
+        diag.log("Resync Monitors chosen")
         Capabilities.shared.forget()
         invalidateDisplayCaches()
         // Clicking this closed the menu, and the cards — which say whether a monitor
@@ -1643,7 +1929,11 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
         let active = onlineDisplays().filter(\.active)
         adoptLegacySettings(active)
         let labels = displayLabels(active)
-        let rows: [NSView] = [PresetRow(frame: .zero)]
+        let rows: [NSView] = [SnapshotRow(title: "Presets", names: presetStore.names, emptyTitle: "",
+                                          pick: { _ in }, saveFirst: {}),
+                              SnapshotRow(title: "Layouts", names: layoutStore.names,
+                                          emptyTitle: "Save Current Arrangement",
+                                          pick: { _ in }, saveFirst: {})]
             + active.map { DisplayCard(display: $0, title: labels[$0.id] ?? $0.name,
                                        menu: nil, canPowerOff: true) }
             + [KeepAwakeRow(frame: .zero)]
@@ -1658,7 +1948,7 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
         }
 
         let menuWindow = show(canvas)
-        let editor = PresetEditorView(window: nil)
+        let editor = SnapshotEditorView(list: presetStore, wording: .presets, window: nil)
         let editorWindow = show(editor)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
