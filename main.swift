@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import IOKit.ps
 import ServiceManagement
 
 // DisplayWave — menu bar control for external monitors.
@@ -1018,6 +1019,195 @@ final class KeepAwake {
     @objc private func expired() { stop() }
 }
 
+/// Bridges the gap between closing the lid and plugging into monitors. Once a
+/// monitor is up and the Mac is on power, macOS stays awake with the lid closed by
+/// itself, but until then closing the lid sleeps it.
+///
+/// That sleep is the one kind no assertion can hold off: only root can stop it,
+/// through pmset's system-wide SleepDisabled setting. That setting stops every
+/// other kind of sleep too — idle, the Sleep menu item — so it is only held as long
+/// as the gap lasts: until a monitor connects on power, or the chosen time runs out.
+/// DisplayWave gets root through a sudoers rule, installed once with the user's
+/// admin password, that allows nothing but `pmset -a disablesleep 0` and `1`.
+enum LidSleep {
+    static let rulePath = "/etc/sudoers.d/displaywave"
+    /// For a hold DisplayWave finds already in place at launch, which came with no
+    /// time of its own.
+    static let defaultHold: TimeInterval = 15 * 60
+
+    static var ruleInstalled: Bool { FileManager.default.fileExists(atPath: rulePath) }
+
+    /// Whether sleep is off, as last read or set. Read at launch and before every
+    /// change, since pmset can change it behind our back.
+    private static var disabled = false
+    /// When the hold runs out, and how long it was set for — what the countdown
+    /// shows. Nil whenever there's no hold.
+    private(set) static var expiry: Date?
+    private(set) static var duration: TimeInterval = 0
+
+    private static var wasDocked = false
+    private static var deadline: Timer?
+    private static var powerSource: CFRunLoopSource?
+    private static var pendingCheck: DispatchWorkItem?
+    // Keeps App Nap from stretching the deadline: a menu bar app with no windows
+    // open is exactly what it throttles.
+    private static var activity: NSObjectProtocol?
+
+    /// Reads whether sleep is off right now, whoever switched it off. Found off, it
+    /// gets the same limits as a hold started from the menu, so one left behind by a
+    /// crash or by hand still ends.
+    static func refresh() {
+        disabled = readDisabled()
+        if !disabled {
+            unwatch()
+        } else if expiry == nil {
+            watch(for: defaultHold)
+        }
+    }
+
+    private static func readDisabled() -> Bool {
+        let settings = IOPMCopySystemPowerSettings()?.takeRetainedValue() as? [String: Any]
+        return settings?["SleepDisabled"] as? Bool ?? false
+    }
+
+    /// Starts a hold, or restarts the countdown of the one running. The real setting
+    /// is checked first, since someone may have run pmset since the menu was built.
+    static func hold(for duration: TimeInterval) {
+        refresh()
+        if !disabled {
+            if !ruleInstalled && !installRule() { return }
+            guard set(disabled: true) else { return }
+            disabled = true
+        }
+        watch(for: duration)
+    }
+
+    /// Hands sleep back to macOS. Also on quit: with nothing left to watch the
+    /// monitors, the hold would otherwise never end.
+    static func release() {
+        unwatch()
+        disabled = readDisabled()
+        guard disabled else { return }
+        if set(disabled: false) { disabled = false }
+    }
+
+    /// Watches for the gap to end: a display or power source change can mean the Mac
+    /// just got docked, and the deadline ends it regardless.
+    private static func watch(for duration: TimeInterval) {
+        if expiry == nil {
+            // Started at the desk, the monitors already there don't count; it's the
+            // next time they connect that the gap is over.
+            wasDocked = docked
+            if let source = IOPSNotificationCreateRunLoopSource({ _ in LidSleep.dockingMayHaveChanged() },
+                                                                nil)?.takeRetainedValue() {
+                CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+                powerSource = source
+            }
+            activity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep, reason: "Keeping the Mac awake with the lid closed")
+        }
+        self.duration = duration
+        expiry = Date(timeIntervalSinceNow: duration)
+        deadline?.invalidate()
+        let t = Timer(timeInterval: duration, repeats: false) { _ in
+            diag.log("No monitor connected in time; handing sleep back")
+            release()
+        }
+        RunLoop.main.add(t, forMode: .common)
+        deadline = t
+    }
+
+    private static func unwatch() {
+        guard expiry != nil else { return }
+        expiry = nil
+        deadline?.invalidate()
+        deadline = nil
+        if let powerSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), powerSource, .commonModes) }
+        powerSource = nil
+        pendingCheck?.cancel()
+        pendingCheck = nil
+        if let activity { ProcessInfo.processInfo.endActivity(activity) }
+        activity = nil
+    }
+
+    /// Called for display and power source changes. Docking arrives as a burst of
+    /// both, and macOS needs a moment after it to take the closed lid over on its
+    /// own, so the check waits for things to settle before handing sleep back.
+    static func dockingMayHaveChanged() {
+        guard expiry != nil else { return }
+        pendingCheck?.cancel()
+        let work = DispatchWorkItem {
+            pendingCheck = nil
+            let nowDocked = docked
+            defer { wasDocked = nowDocked }
+            guard nowDocked && !wasDocked else { return }
+            diag.log("Monitor connected on power; handing sleep back")
+            release()
+        }
+        pendingCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
+    }
+
+    /// A monitor up and the Mac on power: what macOS needs to stay awake with the
+    /// lid closed on its own.
+    private static var docked: Bool {
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16)
+        var count: UInt32 = 0
+        guard CGGetActiveDisplayList(16, &ids, &count) == .success else { return false }
+        let monitor = ids.prefix(Int(count)).contains { CGDisplayIsBuiltin($0) == 0 }
+        let source = IOPSGetProvidingPowerSourceType(IOPSCopyPowerSourcesInfo()?.takeRetainedValue())?
+            .takeUnretainedValue() as String?
+        return monitor && source == kIOPMACPowerKey
+    }
+
+    /// False if the rule is missing or sudo refuses, so nothing is assumed changed.
+    private static func set(disabled: Bool) -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+        // -n: fail rather than wait on a password prompt nobody can see.
+        p.arguments = ["-n", "/usr/bin/pmset", "-a", "disablesleep", disabled ? "1" : "0"]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        do { try p.run() } catch { return false }
+        p.waitUntilExit()
+        let ok = p.terminationStatus == 0
+        if ok {
+            diag.log("Lid sleep \(disabled ? "off" : "back on", privacy: .public)")
+        } else {
+            diag.error("pmset disablesleep \(disabled ? 1 : 0) failed")
+        }
+        return ok
+    }
+
+    /// Asks for the admin password and installs the rule. The file is written by the
+    /// root shell itself rather than copied from somewhere the user can write, and
+    /// visudo checks it before it goes live, since a broken sudoers file breaks sudo
+    /// for everyone. The temporary name has a dot in it, which sudo skips.
+    private static func installRule() -> Bool {
+        // By uid, which needs no quoting, unlike a username.
+        let rule = "#\(getuid()) ALL=(root) NOPASSWD: /usr/bin/pmset -a disablesleep 0, /usr/bin/pmset -a disablesleep 1"
+        let tmp = rulePath + ".new"
+        let shell = "umask 0337; "
+            + "{ echo '# DisplayWave: keep the Mac awake with its lid closed'; echo '\(rule)'; } > \(tmp)"
+            + " && /usr/sbin/visudo -cqf \(tmp) && /bin/mv \(tmp) \(rulePath)"
+            + " || { /bin/rm -f \(tmp); exit 1; }"
+        // The password dialog belongs to whichever app is frontmost; make that us.
+        NSApp.activate(ignoringOtherApps: true)
+        var error: NSDictionary?
+        NSAppleScript(source: "do shell script \"\(shell)\" with administrator privileges")?
+            .executeAndReturnError(&error)
+        if let error {
+            // -128 is the user pressing Cancel, which is no failure.
+            if error[NSAppleScript.errorNumber] as? Int != -128 {
+                diag.error("Installing the lid sleep rule failed: \(error, privacy: .public)")
+            }
+            return false
+        }
+        diag.log("Installed the lid sleep rule")
+        return ruleInstalled
+    }
+}
+
 // MARK: - UI helpers
 
 // Menu content is laid out top-down, which is much easier to reason about flipped.
@@ -1352,7 +1542,6 @@ final class KeepAwakeRow: FlippedView {
 
         let title = label("Keep Mac Awake", size: 11, weight: .medium, color: .secondaryLabelColor)
         title.frame = NSRect(x: pad + 18, y: 6, width: contentWidth - 100, height: 14)
-        title.toolTip = "Stops the Mac and its displays from sleeping. Always runs until turned off or DisplayWave quits."
         addSubview(title)
 
         readout.frame = NSRect(x: pad + contentWidth - 82, y: 6, width: 82, height: 14)
@@ -1391,6 +1580,106 @@ final class KeepAwakeRow: FlippedView {
         case 0: KeepAwake.shared.stop()
         case control.segmentCount - 1: KeepAwake.shared.start(hours: nil)
         case let i: KeepAwake.shared.adjust(hours: Self.steps[i - 1])
+        }
+        refresh()
+    }
+}
+
+// MARK: - Lid sleep row
+
+// A hold for closing the lid before plugging in: Off, then how long to hold for.
+// Picking a time while one runs starts the countdown over. The bar under the
+// control drains as the time runs out.
+final class LidSleepRow: FlippedView {
+    private static let minutes = [5, 15, 30]
+    private let control: NSSegmentedControl
+    private let readout: NSTextField
+    private let track = NSView()
+    private let fill = NSView()
+    private var ticker: Timer?
+
+    override init(frame: NSRect) {
+        control = NSSegmentedControl(labels: ["Off"] + Self.minutes.map { "\($0)m" },
+                                     trackingMode: .momentary, target: nil, action: nil)
+        readout = label("", size: 11, color: .secondaryLabelColor, align: .right)
+        super.init(frame: NSRect(x: 0, y: 0, width: DisplayCard.width, height: 60))
+        let pad: CGFloat = 16
+        let contentWidth = DisplayCard.width - pad * 2
+
+        let icon = NSImageView(frame: NSRect(x: pad, y: 7, width: 13, height: 13))
+        icon.image = NSImage(systemSymbolName: "laptopcomputer", accessibilityDescription: nil)
+        icon.contentTintColor = .secondaryLabelColor
+        addSubview(icon)
+
+        let title = label("Stay Awake with Lid Closed", size: 11, weight: .medium, color: .secondaryLabelColor)
+        title.frame = NSRect(x: pad + 18, y: 6, width: contentWidth - 100, height: 14)
+        addSubview(title)
+
+        readout.frame = NSRect(x: pad + contentWidth - 82, y: 6, width: 82, height: 14)
+        addSubview(readout)
+
+        control.segmentDistribution = .fillEqually
+        control.controlSize = .small
+        control.font = .systemFont(ofSize: 10)
+        control.target = self
+        control.action = #selector(pick)
+        control.frame = NSRect(x: pad, y: 25, width: contentWidth, height: 20)
+        addSubview(control)
+
+        track.frame = NSRect(x: pad, y: 51, width: contentWidth, height: 3)
+        fill.frame = NSRect(x: 0, y: 0, width: 0, height: 3)
+        for bar in [track, fill] {
+            bar.wantsLayer = true
+            bar.layer?.cornerRadius = 1.5
+        }
+        track.addSubview(fill)
+        addSubview(track)
+
+        refresh()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    // Counts down by the second, but only while the row is on screen.
+    override func viewDidMoveToWindow() {
+        ticker?.invalidate()
+        guard window != nil else { ticker = nil; return }
+        let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.refresh() }
+        RunLoop.main.add(t, forMode: .common)
+        ticker = t
+    }
+
+    // Layer colours don't follow appearance changes on their own.
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refresh()
+    }
+
+    private func refresh() {
+        guard let expiry = LidSleep.expiry, LidSleep.duration > 0 else {
+            readout.stringValue = "Off"
+            readout.textColor = .secondaryLabelColor
+            track.isHidden = true
+            return
+        }
+        let left = max(0, expiry.timeIntervalSinceNow)
+        let seconds = Int(left.rounded(.up))
+        readout.stringValue = String(format: "%d:%02d left", seconds / 60, seconds % 60)
+        readout.textColor = .labelColor
+        track.isHidden = false
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            track.layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+            fill.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        }
+        fill.frame.size.width = track.bounds.width * CGFloat(left / LidSleep.duration)
+    }
+
+    @objc private func pick() {
+        let i = control.selectedSegment
+        if i == 0 {
+            LidSleep.release()
+        } else {
+            LidSleep.hold(for: TimeInterval(Self.minutes[i - 1] * 60))
         }
         refresh()
     }
@@ -1565,6 +1854,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let startup = onlineDisplays().filter(\.active)
             .map { "\($0.name) \($0.modeDescription)" }.joined(separator: ", ")
         diag.log("Started with \(startup, privacy: .public)")
+        LidSleep.refresh()
         adoptLegacySettings(onlineDisplays())
         applyAll()
         // Work out which monitors can dim their own backlight. This touches the DDC
@@ -1581,6 +1871,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if flags.contains(.beginConfigurationFlag) { return }
             diag.debug("Reconfigured display \(id), flags \(flags.rawValue)")
             Resync.schedule()
+            LidSleep.dockingMayHaveChanged()
         }, nil)
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
@@ -1607,8 +1898,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Settings are written back lazily while sliders move; make sure the last of
     /// them reaches disk before the app goes away. And if the app dies mid-blackout,
     /// backlights zeroed over DDC have to be turned back up — gamma reverts by
-    /// itself, the backlight doesn't.
+    /// itself, the backlight doesn't. Likewise sleep held off for a closed lid.
     func applicationWillTerminate(_ notification: Notification) {
+        LidSleep.release()
         Blackout.shared.restoreForQuit()
         Store.shared.flush()
     }
@@ -1718,14 +2010,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         awake.view = KeepAwakeRow(frame: .zero)
         menu.addItem(awake)
 
+        let lid = NSMenuItem()
+        lid.view = LidSleepRow(frame: .zero)
+        menu.addItem(lid)
+
         let blackout = NSMenuItem(title: "Blackout", action: #selector(toggleBlackout), keyEquivalent: "")
         blackout.target = self
         blackout.state = Blackout.shared.active ? .on : .off
         blackout.image = NSImage(systemSymbolName: "moon.zzz.fill", accessibilityDescription: nil)
-        blackout.toolTip = "Takes every display dark while the Mac keeps running — for leaving it working overnight. The monitors stay connected, so windows don't move. Press any key or click to bring the screens back exactly as they were."
-        // A tooltip only shows after a hover, so say what it does where it can be seen.
+        // A tooltip only shows after a hover, and menus place them unreliably, so say
+        // what it does in a subtitle where macOS has them, and fall back to a tooltip.
         if #available(macOS 14.4, *) {
             blackout.subtitle = "Screens dark, Mac stays on · key or click to undo"
+        } else {
+            blackout.toolTip = "Takes every display dark while the Mac keeps running — for leaving it working overnight. The monitors stay connected, so windows don't move. Press any key or click to bring the screens back exactly as they were."
         }
         menu.addItem(blackout)
         menu.addItem(.separator())
@@ -1926,7 +2224,7 @@ final class PreviewDelegate: NSObject, NSApplicationDelegate {
                                           pick: { _ in }, saveFirst: {})]
             + active.map { DisplayCard(display: $0, title: labels[$0.id] ?? $0.name,
                                        menu: nil, canPowerOff: true) }
-            + [KeepAwakeRow(frame: .zero)]
+            + [KeepAwakeRow(frame: .zero), LidSleepRow(frame: .zero)]
         let height = rows.reduce(0) { $0 + $1.frame.height + 1 }
 
         let canvas = FlippedView(frame: NSRect(x: 0, y: 0, width: DisplayCard.width, height: height))

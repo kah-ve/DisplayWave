@@ -10,6 +10,10 @@ extern CFDictionaryRef CoreDisplay_DisplayCreateInfoDictionary(CGDirectDisplayID
 // Private CoreGraphics SPI: enable/disable a display at the OS level.
 extern CGError CGSConfigureDisplayEnabled(CGDisplayConfigRef config, CGDirectDisplayID display, bool enabled);
 
+// Private IOKit SPI: the system-wide power settings pmset prints first, including
+// SleepDisabled, which is what stops the Mac sleeping when its lid closes.
+extern CFDictionaryRef IOPMCopySystemPowerSettings(void);
+
 // Private IOKit SPI for DDC/CI over the video cable on Apple Silicon. This is how a
 // monitor's own backlight is driven, as opposed to dimming the image on the GPU.
 typedef CFTypeRef IOAVServiceRef;

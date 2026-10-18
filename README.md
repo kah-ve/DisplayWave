@@ -83,6 +83,12 @@ Paste this into an agent like [Claude Code](https://claude.com/claude-code):
 - **Layouts** save where each monitor sits, which one is main, and its resolution
   and refresh rate.
 - **Keep Mac Awake**, for a set number of hours or until you turn it off.
+- **Stay Awake with Lid Closed**, for closing the lid before you plug into your
+  monitors. Pick 5, 15 or 30 minutes and the Mac stays awake, counting down, until
+  a monitor is connected on power (macOS takes over from there) or the time runs
+  out; then sleep works as normal again. **Off** ends it straight away. It asks
+  for your admin password once, to install a sudoers rule
+  (`/etc/sudoers.d/displaywave`) that allows only `pmset -a disablesleep 0` and `1`.
 - **Blackout** turns every screen dark while the Mac keeps running, without sleeping
   the displays, so nothing disconnects and no windows move. Any key or click brings
   them back.
